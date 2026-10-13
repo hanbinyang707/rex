@@ -9,6 +9,8 @@ import sys
 import tempfile
 import unittest
 
+# 测试不碰真的家目录：锁文件、缓存、~/.config/rex 里的个人词表都按 HOME 找
+os.environ["HOME"] = tempfile.mkdtemp()
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
 import proofread as pf  # noqa: E402
 
