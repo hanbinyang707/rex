@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 链接进 audiocap 二进制（rex.sh 的 ensure_cap：-sectcreate __TEXT __info_plist）。
+	     macOS 弹隐私授权框时从这里拿程序名和用途说明；没有用途说明的程序系统根本不弹框。
+	     来龙去脉见 audiocap.swift 的「权限：自己负责」一节。 -->
+	<key>CFBundleIdentifier</key>
+	<string>local.rex.audiocap</string>
+	<key>CFBundleName</key>
+	<string>rex 录音采集</string>
+	<key>CFBundleDisplayName</key>
+	<string>rex 录音采集</string>
+	<key>CFBundleExecutable</key>
+	<string>audiocap</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>rex 录你说的话（rex start、录音台的「我 + 对方」和「只录我」）。</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>rex 录电脑放出来的声音（通话里对方的声音），不改输出设备。</string>
+</dict>
+</plist>

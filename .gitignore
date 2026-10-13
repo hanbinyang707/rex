@@ -1,0 +1,5 @@
+# audiocap / audiodev 的编译产物：源码变了 rex 会自动重编
+tools/.bin/
+__pycache__/
+*.pyc
+.DS_Store
