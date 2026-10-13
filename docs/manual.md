@@ -1,6 +1,6 @@
 # `rex` manual
 
-> rex prints its messages, and the Recording Desk web UI shows its labels, in Chinese. Output samples in this manual are reproduced verbatim; the surrounding text explains them.
+> rex prints its messages and shows the Recording Desk in English or Chinese, following your macOS language (`REX_LANG` in section 10 overrides it). The output samples in this manual were captured in Chinese mode and are reproduced verbatim; in English mode you will see the English equivalents. Some file and folder names, such as the inbox `~/Recordings/收件箱` and the reports `.校对.md` / `.分析.md`, are the same in both languages.
 
 Records the sound on your computer — what you say yourself, what the computer is playing (podcasts, videos, web pages), or both together. Once it's recorded, a single command turns it into text. **Everything runs locally, with no network access** (except for downloading the whisper model the first time).
 
@@ -885,6 +885,7 @@ Select it again manually in the menu bar. The next time `rex` starts, it automat
 | Variable | Default | Description |
 |---|---|---|
 | `REX_DIR` | `~/Recordings` | Where recordings are saved |
+| `REX_LANG` | (your macOS language) | Output language, `en` or `zh`. Or write it to `~/.config/rex/lang` to make it permanent |
 | `REX_MAX` | `21600` (6 hours) | Maximum recording length, in seconds |
 | `WHISPER_MODEL` | `~/.cache/whisper/ggml-large-v3-turbo-q5_0.bin` | Use a different recognition model |
 | `WHISPER_VAD_MODEL` | `~/.cache/whisper/ggml-silero-v5.1.2.bin` | Use a different VAD model |

@@ -52,6 +52,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import claude_cli  # noqa: E402
 import speakers  # noqa: E402  read_srt / write_srt / rebuild / NAME_OK
+from i18n import L  # noqa: E402
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 # 用户自己的词表在 ~/.config/rex/（不进仓库），没有才用仓库里的模板。rex.sh 的 WPROMPT 是同一个规矩
@@ -86,7 +87,7 @@ SCHEMA = {
     "required": ["fixes"],
 }
 
-PROMPT = """你在校对一份语音转写稿。它是 whisper 自动转写的，标准输入里每行是「[编号] 说话人｜文字」\
+PROMPT = L("""你在校对一份语音转写稿。它是 whisper 自动转写的，标准输入里每行是「[编号] 说话人｜文字」\
 （没有说话人时只有「[编号] 文字」）。说话人是另外推测的，不归你管，不要改。
 
 只找**语音识别错误**：同音字、近音字、专有名词/术语/人名/书名/地名听错、英文词被写成音译或
@@ -100,7 +101,31 @@ PROMPT = """你在校对一份语音转写稿。它是 whisper 自动转写的�
 - sure：结合上下文能确定是 true；只是觉得可能是 false
 - why：一句话理由（比如「持续学习的术语」「上下文是在说签学校」）
 
-没有错误就返回空列表。宁可少改，不要乱改。{extra}"""
+没有错误就返回空列表。宁可少改，不要乱改。{extra}""",
+           # 英文版规则和上面一条不差；多的只有最后那句：why 用英文写，old / new 照稿子原样、不要翻译
+           """You are proofreading a speech transcript. It was transcribed automatically by whisper. Each line on \
+standard input is "[number] speaker｜text" (just "[number] text" when there is no speaker). The speakers were \
+guessed separately; they are not your job, so don't change them.
+
+Look only for **speech-recognition errors**: homophones and near-homophones; misheard proper nouns, terms, \
+personal names, book titles or place names; English words written as a phonetic transliteration or as the wrong \
+word; obviously missing or extra characters or words that make a sentence unreadable. **Never change** any of \
+these: how people phrase things and their choice of words, verbal tics, repetition, word order, filler words, \
+punctuation (unless it is wrong enough to hurt understanding). Don't polish, and don't turn spoken language into \
+written language.
+
+For each error, give:
+- id: the number of that line (only numbers from the "Lines to proofread" part)
+- old: a short piece of that line's original text. It must match the original **exactly, character for \
+character**. Keep it as short as possible, but long enough that it doesn't occur twice in that line
+- new: what it should be
+- sure: true if the context makes you certain; false if you only think it might be wrong
+- why: a one-sentence reason, written in English (e.g. "a term from continual learning", "the context is about \
+signing with a school")
+
+Only why is in English: don't translate old or new.
+
+If there are no errors, return an empty list. Better to change too little than to change something wrongly.{extra}""")
 
 
 def log(msg):
@@ -173,7 +198,9 @@ def claude_json(prompt, text, schema):
         args += ["--effort", EFFORT]
     if os.environ.get("REX_CLAUDE_MODEL"):
         args += ["--model", os.environ["REX_CLAUDE_MODEL"]]
-    obj = claude_cli.run(args + ["按系统提示校对下面这份稿子，返回修改清单。"], text, TIMEOUT,
+    obj = claude_cli.run(args + [L("按系统提示校对下面这份稿子，返回修改清单。",
+                                   "Proofread the transcript below as the system prompt says, and return the list "
+                                   "of changes.")], text, TIMEOUT,
                          cwd=claude_cli.neutral_dir())
     out = obj.get("structured_output")
     if out is None:
@@ -182,7 +209,7 @@ def claude_json(prompt, text, schema):
         try:
             out = json.loads(s)
         except ValueError:
-            raise RuntimeError("回的不是修改清单：%s" % s[:200])
+            raise RuntimeError(L("回的不是修改清单：%s", "The reply isn't a list of changes: %s") % s[:200])
     return out
 
 
@@ -221,9 +248,9 @@ def render(ctx, body):
         return "[%d] %s｜%s" % (e["id"], who, t) if who else "[%d] %s" % (e["id"], t)
     parts = []
     if ctx:
-        parts.append("【上文，只供参考，不要改】")
+        parts.append(L("【上文，只供参考，不要改】", "【Preceding lines, for reference only: don't change】"))
         parts.extend(line(e) for e in ctx)
-    parts.append("【要校对的部分】")
+    parts.append(L("【要校对的部分】", "【Lines to proofread】"))      # 名字和 PROMPT 里 id 那条说的对得上
     parts.extend(line(e) for e in body)
     return "\n".join(parts) + "\n"
 
@@ -246,6 +273,16 @@ def to_ranges(lines):
         else:
             out.append([i, i])
     return out
+
+
+def spans(ranges):
+    """[[1, 120], [361, 480]] → 「1~120、361~480」（英文是「1-120, 361-480」），日志和报告里写行号范围都用它。"""
+    return L("、", ", ").join(L("%d~%d", "%d-%d") % (a, b) for a, b in ranges)
+
+
+def plural(n, word):
+    """英文的单复数：1 line / 2 lines。只给英文那一半用。"""
+    return "%d %s%s" % (n, word, "" if n == 1 else "s")
 
 
 def valid_fixes(out):
@@ -338,8 +375,11 @@ def bootstrap(prefix, entries):
     if not os.path.exists(path):
         return None
     state, kind = new_state(), None
+    # 中文、英文的报告都认：报告用哪种语言写，看当时是哪种语言在跑，和现在不一定一样
     heads = (("## 改了的", "applied"), ("## 拿不准", "unsure"), ("## 没对上原文", "missed"),
-             ("## 你没采纳的", "rejected"))
+             ("## 你没采纳的", "rejected"),
+             ("## Changed", "applied"), ("## Uncertain", "unsure"), ("## Not found in the original", "missed"),
+             ("## Rejected by you", "rejected"))
     for line in open(path, encoding="utf-8"):
         if line.startswith("## "):
             kind = next((k for h, k in heads if line.startswith(h)), None)
@@ -354,8 +394,8 @@ def bootstrap(prefix, entries):
         if hit:
             row["id"], row["t"] = hit["id"], hit["a"]
         add_row(state, kind, row)
-    m = re.search(r"^- 校对：(.*)$", open(path, encoding="utf-8").read(), re.M)
-    state["runs"].append({"when": "（老版本报告）", "note": m.group(1) if m else ""})
+    m = re.search(r"^- (?:校对：|Proofread: )(.*)$", open(path, encoding="utf-8").read(), re.M)
+    state["runs"].append({"when": L("（老版本报告）", "(old report)"), "note": m.group(1) if m else ""})
     return state
 
 
@@ -385,42 +425,62 @@ def render_md(name, state):
             total[k] += r.get("usage", {}).get(k, 0) or 0
     last = state["runs"][-1] if state["runs"] else {}
     fail_lines = sum(b - a + 1 for a, b in state["failed"])
-    lines = ["# 校对报告：%s" % name, ""]
+    # 标题、摘要、表头跟着语言走；bootstrap() 两种语言的标题都认。rex.sh / rex_app 按「改了 **N** 处 · 拿不准、
+    # 没改 **M** 处」那一行读数字，英文报告是「Changed: **N** · Uncertain, not changed: **M**」
+    lines = [L("# 校对报告：%s", "# Proofreading report: %s") % name, ""]
     for r in state["runs"]:
-        lines.append("- 校对：%s%s" % (r.get("when", ""), "，" + r["note"] if r.get("note") else ""))
+        lines.append(L("- 校对：%s%s", "- Proofread: %s%s")
+                     % (r.get("when", ""), L("，", ", ") + r["note"] if r.get("note") else ""))
     if total["calls"]:
-        lines.append("- 用量：%d 次调用 · 送进去 %s token · 输出 %s · 折合 API 价约 $%.2f"
-                     "（Max 订阅不按这个价收钱，只是衡量用了多少额度）"
-                     % (total["calls"], claude_cli.wan(total["in"]), claude_cli.wan(total["out"]), total["cost"]))
-    lines.append("- 改了 **%d** 处 · 拿不准、没改 **%d** 处 · 没对上原文 %d 处%s"
+        lines.append(L("- 用量：%d 次调用 · 送进去 %s token · 输出 %s · 折合 API 价约 $%.2f"
+                       "（Max 订阅不按这个价收钱，只是衡量用了多少额度）"
+                       % (total["calls"], claude_cli.wan(total["in"]), claude_cli.wan(total["out"]), total["cost"]),
+                       "- Usage: %s (a Max subscription isn't charged this price; it only measures how much quota "
+                       "was used)" % claude_cli.usage_text(total)))
+    lines.append(L("- 改了 **%d** 处 · 拿不准、没改 **%d** 处 · 没对上原文 %d 处%s",
+                   "- Changed: **%d** · Uncertain, not changed: **%d** · Not found in the original: %d%s")
                  % (len(state["applied"]), len(state["unsure"]), len(state["missed"]),
-                    " · 你没采纳 %d 处" % len(state["rejected"]) if state["rejected"] else ""))
+                    L(" · 你没采纳 %d 处", " · Rejected by you: %d") % len(state["rejected"]) if state["rejected"] else ""))
     if state["failed"]:
-        lines.append("- **还有 %d 行没校成**（第 %s 行）：再跑一次 `rex go` 会只补这几段"
-                     % (fail_lines, "、".join("%d~%d" % (a, b) for a, b in state["failed"])))
-    lines.append("- 校对前的原稿：`%s.whisper.srt`；稿子本体是 `.srt`，要自己改就改它（`.txt` 每次由它重新生成）" % name
-                 if state["applied"] else "- 这次没有改动稿子（之前改过的在 `.srt` 里，原稿在 `%s.whisper.srt`）" % name)
+        lines.append(L("- **还有 %d 行没校成**（第 %s 行）：再跑一次 `rex go` 会只补这几段",
+                       "- **Lines not proofread yet: %d** (%s): running `rex go` again redoes just those")
+                     % (fail_lines, spans(state["failed"])))
+    lines.append(L("- 校对前的原稿：`%s.whisper.srt`；稿子本体是 `.srt`，要自己改就改它（`.txt` 每次由它重新生成）",
+                   "- Transcript before proofreading: `%s.whisper.srt`. The transcript itself is the `.srt`: to fix "
+                   "something yourself, edit that (the `.txt` is regenerated from it every time)") % name
+                 if state["applied"] else
+                 L("- 这次没有改动稿子（之前改过的在 `.srt` 里，原稿在 `%s.whisper.srt`）",
+                   "- No changes to the transcript this time (earlier changes are in the `.srt`; the original is "
+                   "`%s.whisper.srt`)") % name)
     lines.append("")
 
     def table(rows, head, by=False):
-        out = ["| 时间 | 说话人 | 原文 | %s | 理由 |" % head, "|---|---|---|---|---|"]
+        out = [L("| 时间 | 说话人 | 原文 | %s | 理由 |", "| Time | Speaker | Original | %s | Reason |") % head,
+               "|---|---|---|---|---|"]
         for r in rows:
-            why = r.get("why", "") + ("（你采纳的）" if by and r.get("by") == "你" else "")
+            why = r.get("why", "") + (L("（你采纳的）", " (accepted by you)") if by and r.get("by") == "你" else "")
             out.append("| %s | %s | %s | %s | %s |" % (stamp(r["t"]), r.get("who", ""),
                        r["old"].replace("|", "｜"), r["new"].replace("|", "｜"), why.replace("|", "｜")))
         return out
     if state["applied"]:
-        lines += ["## 改了的（%d）" % len(state["applied"]), ""] + table(state["applied"], "改成", True) + [""]
+        lines += [L("## 改了的（%d）", "## Changed (%d)") % len(state["applied"]), ""] \
+            + table(state["applied"], L("改成", "Changed to"), True) + [""]
     if state["unsure"]:
-        lines += ["## 拿不准、没改的（%d）——请你确认" % len(state["unsure"]), "",
-                  "这些只是建议，稿子里还是原文。在录音台（rex app）里逐条点「采纳 / 不采纳」，或者自己改。", ""]
-        lines += table(state["unsure"], "建议") + [""]
+        lines += [L("## 拿不准、没改的（%d）——请你确认", "## Uncertain, not changed (%d): please confirm")
+                  % len(state["unsure"]), "",
+                  L("这些只是建议，稿子里还是原文。在录音台（rex app）里逐条点「采纳 / 不采纳」，或者自己改。",
+                    "These are only suggestions; the transcript still has the original text. In the Recording Desk "
+                    "(rex app), click Accept or Reject on each one, or edit the transcript yourself."), ""]
+        lines += table(state["unsure"], L("建议", "Suggested")) + [""]
     if state["rejected"]:
-        lines += ["## 你没采纳的（%d）" % len(state["rejected"]), ""] + table(state["rejected"], "建议") + [""]
+        lines += [L("## 你没采纳的（%d）", "## Rejected by you (%d)") % len(state["rejected"]), ""] \
+            + table(state["rejected"], L("建议", "Suggested")) + [""]
     if state["missed"]:
-        lines += ["## 没对上原文的（%d）" % len(state["missed"]), "",
-                  "Claude 引的原文在那一行里找不到（多半是它自己抄错了），没改。", ""]
-        lines += table(state["missed"], "建议") + [""]
+        lines += [L("## 没对上原文的（%d）", "## Not found in the original (%d)") % len(state["missed"]), "",
+                  L("Claude 引的原文在那一行里找不到（多半是它自己抄错了），没改。",
+                    "The text Claude quoted isn't in that line (most likely it copied it wrong), so nothing was "
+                    "changed."), ""]
+        lines += table(state["missed"], L("建议", "Suggested")) + [""]
     return "\n".join(lines)
 
 
@@ -444,20 +504,25 @@ def _decide(prefix, rid, action):
     labeled = has_labels(entries)
     state = load_state(prefix, entries)
     if not state:
-        return False, "这条录音还没有校对报告"
+        return False, L("这条录音还没有校对报告", "This recording has no proofreading report yet")
     kind, row = next(((k, r) for k in ("unsure", "applied", "rejected") for r in state[k]
                       if r.get("rid") == rid), (None, None))
     if not row:
-        return False, "找不到这一条（报告可能刚被重写过，刷新一下）"
+        return False, L("找不到这一条（报告可能刚被重写过，刷新一下）",
+                        "Can't find this item (the report may have just been rewritten; refresh the page)")
     if action == "accept" and kind in ("unsure", "rejected"):
         e = find_entry(entries, row, row["old"])
         if not e:
-            return False, "稿子里找不到原文「%s」了，可能已经改过" % row["old"]
+            return False, L("稿子里找不到原文「%s」了，可能已经改过",
+                            "“%s” is no longer in the transcript; it may have been changed already") % row["old"]
         if locate(split_label(e["text"], labeled)[1], row["old"]) == -2:
-            return False, "「%s」在这一行出现不止一次，不知道该改哪一个，请你直接改稿子" % row["old"]
+            return False, L("「%s」在这一行出现不止一次，不知道该改哪一个，请你直接改稿子",
+                            "“%s” appears more than once in this line, so it's unclear which one to change; "
+                            "please edit the transcript directly") % row["old"]
         pos = replace_in(e, row["old"], row["new"], labeled=labeled)
         if pos is None:
-            return False, "稿子里找不到原文「%s」了，可能已经改过" % row["old"]
+            return False, L("稿子里找不到原文「%s」了，可能已经改过",
+                            "“%s” is no longer in the transcript; it may have been changed already") % row["old"]
         state[kind].remove(row)
         state["applied"].append(dict(row, id=e["id"], t=e["a"], by="你", pos=pos))
     elif action == "reject" and kind == "unsure":
@@ -465,23 +530,28 @@ def _decide(prefix, rid, action):
         state["rejected"].append(dict(row, by="你"))
     elif action == "undo" and kind == "applied":
         if row["new"] == "" and row.get("pos") is None:
-            return False, "这一条是删字，老版本的报告没记位置，没法自动撤销，请你直接改稿子"
+            return False, L("这一条是删字，老版本的报告没记位置，没法自动撤销，请你直接改稿子",
+                            "This change deleted text, and old reports didn't record where, so it can't be undone "
+                            "automatically; please edit the transcript directly")
         e = find_entry(entries, row, row["new"]) if row["new"] else (
             entries[row["id"] - 1] if row.get("id") and 1 <= row["id"] <= len(entries) else None)
         if not e:
-            return False, "稿子里找不到「%s」了，没法撤销" % row["new"]
+            return False, L("稿子里找不到「%s」了，没法撤销",
+                            "“%s” is no longer in the transcript, so it can't be undone") % row["new"]
         pos = replace_in(e, row["new"], row["old"], pos=row.get("pos"), labeled=labeled)
         if pos is None:
-            return False, "稿子里「%s」的位置对不上了（这一行后来又改过？），没法自动撤销，请你直接改稿子" % row["new"]
+            return False, L("稿子里「%s」的位置对不上了（这一行后来又改过？），没法自动撤销，请你直接改稿子",
+                            "“%s” is no longer where it was in the transcript (was the line edited since?), so it "
+                            "can't be undone automatically; please edit the transcript directly") % row["new"]
         state["applied"].remove(row)
         state["rejected"].append(dict(row, id=e["id"], t=e["a"], by="你撤销"))
     else:
-        return False, "这一条现在不能这么操作"
+        return False, L("这一条现在不能这么操作", "That action isn't available for this item right now")
     write_transcript(prefix, entries)
     state["applied"].sort(key=lambda r: r["t"])
     state["rejected"].sort(key=lambda r: r["t"])
     save_state(prefix, state)
-    return True, "好了"
+    return True, L("好了", "Done")
 
 
 def parse_ranges(s, n):
@@ -494,16 +564,23 @@ def parse_ranges(s, n):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="用 Claude 校对转写稿")
+    ap = argparse.ArgumentParser(description=L("用 Claude 校对转写稿", "Proofread a transcript with Claude"))
     ap.add_argument("prefix")
-    ap.add_argument("--context", default="", help="一句话说明这是什么录音，帮 Claude 认词")
-    ap.add_argument("--lines", default="", help="只校这几段行号，比如 1-120,361-480；结果并进原来的报告")
-    ap.add_argument("--retry", action="store_true", help="只补报告里记着没校成的那几段")
+    ap.add_argument("--context", default="", help=L("一句话说明这是什么录音，帮 Claude 认词",
+                                                    "One sentence on what the recording is, to help Claude get "
+                                                    "words right"))
+    ap.add_argument("--lines", default="", help=L("只校这几段行号，比如 1-120,361-480；结果并进原来的报告",
+                                                  "Only proofread these line ranges, e.g. 1-120,361-480; the "
+                                                  "results are merged into the existing report"))
+    ap.add_argument("--retry", action="store_true", help=L("只补报告里记着没校成的那几段",
+                                                           "Only redo the ranges the report lists as not "
+                                                           "proofread"))
     a = ap.parse_args()
     global LABELED
     entries = read_entries(a.prefix)
     if not entries:
-        log("  没有可校对的内容（%s.srt 是空的或不存在）" % a.prefix)
+        log(L("  没有可校对的内容（%s.srt 是空的或不存在）", "  Nothing to proofread (%s.srt is empty or missing)")
+            % a.prefix)
         return 2
     LABELED = has_labels(entries)
 
@@ -514,16 +591,19 @@ def main():
         # 去重合并：failed 里要是记重了（老版本会），同一段会被校两遍、同一条改动应用两次
         ranges = to_ranges(i for lo, hi in ranges for i in range(lo, hi + 1))
         if not ranges:
-            log("  报告里没有记着没校成的行，不用补" if a.retry else "  --lines 给的范围不在稿子里")
+            log(L("  报告里没有记着没校成的行，不用补", "  The report lists no lines that failed; nothing to redo")
+                if a.retry else L("  --lines 给的范围不在稿子里", "  The --lines ranges aren't in the transcript"))
             print("CHANGES %d %d" % (len(state["applied"]), len(state["unsure"])))
             return 0
 
     g = glossary()
     extra = ""
     if g:
-        extra += "\n\n用户常用的词（听起来像的时候优先考虑它们）：" + "、".join(g)
+        extra += L("\n\n用户常用的词（听起来像的时候优先考虑它们）：",
+                   "\n\nWords the user often uses (prefer them when something sounds like one): ") \
+            + L("、", ", ").join(g)
     if a.context:
-        extra += "\n\n这段录音是：" + a.context
+        extra += L("\n\n这段录音是：", "\n\nAbout this recording: ") + a.context
     prompt = PROMPT.format(extra=extra)
 
     if ranges is None:
@@ -534,9 +614,11 @@ def main():
             for s0 in range(lo, hi + 1, CHUNK):
                 body = entries[s0 - 1:min(hi, s0 + CHUNK - 1)]
                 jobs.append((entries[max(0, s0 - 1 - CONTEXT):s0 - 1], body))
-        log("  只补第 %s 行" % "、".join("%d~%d" % (lo, hi) for lo, hi in ranges))
-    log("  Claude 校对：%d 行，分 %d 份，同时跑 %d 份"
-        % (sum(len(b) for _, b in jobs), len(jobs), min(PARALLEL, len(jobs))))
+        log(L("  只补第 %s 行", "  Only redoing lines %s") % spans(ranges))
+    n_lines = sum(len(b) for _, b in jobs)
+    log(L("  Claude 校对：%d 行，分 %d 份，同时跑 %d 份" % (n_lines, len(jobs), min(PARALLEL, len(jobs))),
+          "  Claude proofreading: %s in %s, %d at a time"
+          % (plural(n_lines, "line"), plural(len(jobs), "chunk"), min(PARALLEL, len(jobs)))))
     # Ctrl-C / 被 kill：停掉还在跑的、不再发新的，**已经校完的几份照样记进报告**。原来 with 块退出时
     # 等排队的任务一份份起来跑完（稿子照样外发、额度照扣），最后什么都不写
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
@@ -549,22 +631,24 @@ def main():
             body = futs[fu]
             handled.add(fu)
             done += 1
-            where = "[%d/%d] 第 %d~%d 行" % (done, len(jobs), body[0]["id"], body[-1]["id"])
+            where = L("[%d/%d] 第 %d~%d 行", "[%d/%d] lines %d-%d") % (done, len(jobs), body[0]["id"], body[-1]["id"])
             try:
                 out = fu.result()
             except claude_cli.AccountError as e:
                 account = e.args[0]
                 failed.append([body[0]["id"], body[-1]["id"]])
-                log("  Claude 用不了，后面的不再试：%s" % account)
+                log(L("  Claude 用不了，后面的不再试：%s", "  Claude is unavailable; not trying the rest: %s") % account)
                 break
             except Exception as e:  # noqa: BLE001  一份失败不连坐其余，但要说出来
                 failed.append([body[0]["id"], body[-1]["id"]])
-                log("  %s 校对失败：%s" % (where, e))
+                log(L("  %s 校对失败：%s", "  %s failed: %s") % (where, e))
                 continue
             fixes = valid_fixes(out)
             if fixes is None:
                 failed.append([body[0]["id"], body[-1]["id"]])
-                log("  %s 回的不是修改清单的格式，这一份算失败：%s" % (where, str(out)[:120]))
+                log(L("  %s 回的不是修改清单的格式，这一份算失败：%s",
+                      "  %s: the reply isn't in the change-list format, so this chunk counts as failed: %s")
+                    % (where, str(out)[:120]))
                 continue
             ok = {e["id"] for e in body}
             n = dropped = 0
@@ -574,10 +658,14 @@ def main():
                     n += 1
                 else:
                     dropped += 1
-            log("  %s：%d 条建议%s" % (where, n, "，%d 条行号越界不认" % dropped if dropped else ""))
+            log(L("  %s：%d 条建议%s", "  %s: %d suggested%s")
+                % (where, n, L("，%d 条行号越界不认", ", %d ignored (line number out of range)") % dropped
+                   if dropped else ""))
     except KeyboardInterrupt:
         interrupted = True
-        log("  收到中断：停掉还在跑的，不再发新的；已经校完的照样记进报告")
+        log(L("  收到中断：停掉还在跑的，不再发新的；已经校完的照样记进报告",
+              "  Interrupted: stopping the chunks still running and not starting new ones; finished chunks still "
+              "go into the report"))
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
         if account or interrupted:
@@ -590,7 +678,8 @@ def main():
     if len(results) == 0 and sum(hi - lo + 1 for lo, hi in failed) >= sum(len(b) for _, b in jobs):
         # 一份都没校成就不写报告：rex go 认「有报告 = 校对过了」，留一份「改了 0 处」的空报告，
         # 下次就不会再校了（第一次真跑 31 份全挂，就留下过这么一份）。补的时候也一样，原样不动
-        log("  一份都没校成，稿子没动，报告也不动")
+        log(L("  一份都没校成，稿子没动，报告也不动",
+              "  No chunk was proofread; the transcript and the report are left as they were"))
         if account:
             print("ACCOUNT %s" % account)
             return 3
@@ -622,19 +711,20 @@ def main():
             state[k].sort(key=lambda r: r["t"])
         used = claude_cli.usage_numbers()
         state["runs"].append({"when": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                              "note": "Claude（%s%s）%s%s" % (claude_cli.models(), "，思考强度 %s" % EFFORT if EFFORT else "",
-                                                           "，只补了第 %s 行" % "、".join("%d~%d" % (lo, hi) for lo, hi in ranges)
-                                                           if ranges else "",
-                                                           "，中途被停下" if interrupted else ("，Claude 中途用不了" if account else "")),
+                              "note": L("Claude（%s%s）%s%s", "Claude (%s%s)%s%s")
+                              % (claude_cli.models(), L("，思考强度 %s", ", effort %s") % EFFORT if EFFORT else "",
+                                 L("，只补了第 %s 行", ", only redid lines %s") % spans(ranges) if ranges else "",
+                                 L("，中途被停下", ", stopped partway") if interrupted
+                                 else (L("，Claude 中途用不了", ", Claude became unavailable partway") if account else "")),
                               "usage": used})
         save_state(a.prefix, state)
 
     name = os.path.basename(a.prefix)
-    log("  改了 %d 处 · 拿不准没改 %d 处%s → %s.校对.md"
-        % (nA, nU, " · 第 %s 行没校成" % "、".join("%d~%d" % (lo, hi) for lo, hi in failed) if failed else "", name))
+    log(L("  改了 %d 处 · 拿不准没改 %d 处%s → %s.校对.md", "  Changed: %d · uncertain, not changed: %d%s → %s.校对.md")
+        % (nA, nU, L(" · 第 %s 行没校成", " · lines %s not proofread") % spans(failed) if failed else "", name))
     note = claude_cli.usage_note()
     if note:
-        log("  用量：%s" % note)
+        log(L("  用量：%s", "  Usage: %s") % note)
     if account:
         print("ACCOUNT %s" % account)
         return 3
@@ -667,12 +757,15 @@ def apply_fixes(state, results, byid, labeled=None):
             if i == -1:
                 add_row(state, "missed", row)
             elif i == -2:
-                row["why"] = (row["why"] + "；" if row["why"] else "") + "这几个字在这一行出现不止一次，没自动改"
+                row["why"] = (row["why"] + L("；", "; ") if row["why"] else "") \
+                    + L("这几个字在这一行出现不止一次，没自动改",
+                        "this text appears more than once in the line, so it wasn't changed automatically")
                 add_row(state, "unsure", row)
                 nU += 1
             elif not f.get("sure") or looks_like_rewrite(old, new):
                 if f.get("sure"):      # 它说有把握、是被拦下的：写明为什么没收，不然看着像它自己犹豫
-                    row["why"] = (row["why"] + "；" if row["why"] else "") + "改动太大，不像纠错，没收"
+                    row["why"] = (row["why"] + L("；", "; ") if row["why"] else "") \
+                        + L("改动太大，不像纠错，没收", "too big a change to be a correction, so it wasn't applied")
                 add_row(state, "unsure", row)
                 nU += 1
             else:
@@ -684,7 +777,8 @@ def apply_fixes(state, results, byid, labeled=None):
                 continue
             seen.add((i, old, new))
             if i < last_end:
-                row["why"] = (row["why"] + "；" if row["why"] else "") + "和同一行另一条改动重叠，没改"
+                row["why"] = (row["why"] + L("；", "; ") if row["why"] else "") \
+                    + L("和同一行另一条改动重叠，没改", "overlaps another change in the same line, so it wasn't applied")
                 add_row(state, "unsure", row)
                 nU += 1
                 continue

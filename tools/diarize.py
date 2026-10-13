@@ -101,6 +101,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import speakers  # noqa: E402  turns / write_txt / write_srt / split_text 共用一套
+from i18n import L  # noqa: E402
 
 CACHE = os.environ.get("REX_DIAR_DIR") or os.path.expanduser("~/.cache/sherpa-onnx")
 INIT_TH = 0.5         # 第一步故意分细。0.6 时两个相似的声音已经会进同一堆
@@ -175,7 +176,7 @@ class Embedder:
         self._cfg = Cfg(model=model.encode(), num_threads=THREADS, debug=0, provider=b"cpu")
         self.ex = create(ctypes.byref(self._cfg))
         if not self.ex:
-            raise RuntimeError("创建声纹提取器失败")
+            raise RuntimeError(L("创建声纹提取器失败", "couldn't create the voiceprint extractor"))
         self.dim = self.dim_(self.ex)
 
     def __call__(self, raw):
@@ -302,7 +303,8 @@ def merge(segs, cent, n, log):
     if not keep and cl:
         keep = [max(cl, key=lambda s: cl[s][0])]
     if n > 0 and len(keep) < n:
-        log("  只分得出 %d 个人（细分那一步就没有更多堆了）" % len(keep))
+        log(L("  只分得出 %d 个人（细分那一步就没有更多堆了）",
+              "  Could only separate %d speaker(s) (the fine-split step produced no more clusters)") % len(keep))
     # 碎堆并给声纹最像的那个人
     final = {}
     for s, o in owner.items():
@@ -318,7 +320,9 @@ def two_stage(wav, kit, n, log):
     try:
         emb = Embedder(kit[3], kit[2])
     except Exception as e:  # noqa: BLE001  任何加载失败都退回老办法，说出原因
-        log("  声纹 C 接口加载失败（%s），退回只用 sherpa 自己的聚类——人数可能偏多" % e)
+        log(L("  声纹 C 接口加载失败（%s），退回只用 sherpa 自己的聚类——人数可能偏多",
+              "  Couldn't load the voiceprint C API (%s); falling back to sherpa's own clustering, "
+              "which may count too many speakers") % e)
         return None
     segs = diarize(wav, INIT_TH, kit)
     if not segs:
@@ -330,7 +334,9 @@ def two_stage(wav, kit, n, log):
     out = [(a, z, final[s]) for a, z, s in segs if s in final]
     rest = [(a, z, s) for a, z, s in segs if s not in final]   # 太小、没算声纹的碎片
     out = nearest_in_time(sorted(out + rest), set(keep))
-    log("  先细分成 %d 小堆，再按平均声纹并成 %d 个人" % (len(durations(segs)), len(keep)))
+    log(L("  先细分成 %d 小堆，再按平均声纹并成 %d 个人",
+          "  Split finely into %d clusters, then merged by average voiceprint into %d speaker(s)")
+        % (len(durations(segs)), len(keep)))
     return out
 
 
@@ -414,11 +420,11 @@ def map_call(segs, lab):
             continue
         local = c["L"] / float(n)
         if local >= 0.8:
-            names[s] = "我"
+            names[s] = L("我", "Me")
         elif local <= 0.6:
-            names[s] = "对方"
+            names[s] = L("对方", "Other")
     # 全对成一边说明这个判据在这条录音上不成立（比如通话音频本身就是全频带的）
-    if "我" not in names.values() or "对方" not in names.values():
+    if L("我", "Me") not in names.values() or L("对方", "Other") not in names.values():
         return None
     return names
 
@@ -524,29 +530,33 @@ def unlabel(subs):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="按声纹分人")
-    ap.add_argument("--wav", required=True, help="16 kHz 单声道")
+    ap = argparse.ArgumentParser(description=L("按声纹分人", "Speaker diarization by voiceprint"))
+    ap.add_argument("--wav", required=True, help=L("16 kHz 单声道", "16 kHz mono"))
     ap.add_argument("--srt", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--speakers", type=int, default=0, help="已知人数；不给就自动判")
-    ap.add_argument("--call", help="混成一轨的老 rex both 原始文件，按频谱对上我/对方")
+    ap.add_argument("--speakers", type=int, default=0,
+                    help=L("已知人数；不给就自动判", "known number of speakers; detected automatically if omitted"))
+    ap.add_argument("--call", help=L("混成一轨的老 rex both 原始文件，按频谱对上我/对方",
+                                     "original file of an old rex both recording mixed into one track; "
+                                     "the spectrum is used to match Me/Other"))
     a = ap.parse_args()
     log = lambda m: print(m, flush=True)  # noqa: E731
 
     kit = tools()
     if not kit:
-        log("  找不到 sherpa-onnx（应该在 %s）" % CACHE)
+        log(L("  找不到 sherpa-onnx（应该在 %s）", "  sherpa-onnx not found (expected in %s)") % CACHE)
         return 3
     subs = unlabel(speakers.read_srt(a.srt))
     if not subs:
-        log("  稿子是空的，没什么可分的")
+        log(L("  稿子是空的，没什么可分的", "  The transcript is empty; nothing to diarize"))
         return 2
 
     segs = two_stage(a.wav, kit, a.speakers, log)
     if segs is None:
         segs = fallback(a.wav, kit, a.speakers, log)
     if not segs:
-        log("  声纹分人没出结果（sherpa-onnx 没吐出任何段）")
+        log(L("  声纹分人没出结果（sherpa-onnx 没吐出任何段）",
+              "  Speaker diarization produced no result (sherpa-onnx returned no segments)"))
         return 4
     order = []
     for x in sorted(segs):
@@ -558,17 +568,23 @@ def main():
         lab = spectral(a.call)
         names = map_call(segs, lab) if lab else None
         if names:
-            log("  按频谱对上了：麦克风这边 = 我，通话那头 = 对方（推测，不是分轨）")
+            log(L("  按频谱对上了：麦克风这边 = 我，通话那头 = 对方（推测，不是分轨）",
+                  "  Matched by spectrum: microphone side = Me, far end of the call = Other "
+                  "(inferred, not from separate tracks)"))
         else:
-            log("  频谱对不上（通话音频不是窄带的，或者某一边几乎没声音），保持说话人编号")
+            log(L("  频谱对不上（通话音频不是窄带的，或者某一边几乎没声音），保持说话人编号",
+                  "  Couldn't match by spectrum (the call audio isn't narrowband, or one side is nearly "
+                  "silent); keeping the speaker numbers"))
     if not names:
-        names = {s: "说话人%d" % (i + 1) for i, s in enumerate(order)}
+        names = {s: L("说话人%d", "Speaker %d") % (i + 1) for i, s in enumerate(order)}
     for s in order:
-        names.setdefault(s, "说话人%d" % (order.index(s) + 1))
+        names.setdefault(s, L("说话人%d", "Speaker %d") % (order.index(s) + 1))
     if len(set(names.values())) < 2:
         # 独白、讲座、播客：一个人从头说到尾，贴满「说话人1」只会让稿子更难读
-        log("  只听出 1 个人在说话，稿子保持原样（其实不止一个人：rex who 文件 人数——"
-            "声音很像的两个人可能被当成一个）")
+        log(L("  只听出 1 个人在说话，稿子保持原样（其实不止一个人：rex who 文件 人数——"
+              "声音很像的两个人可能被当成一个）",
+              "  Heard only 1 speaker; the transcript is left as is (if there are more: rex who <file> <count>; "
+              "two very similar voices can be taken for one)"))
         return 5
 
     lines = attribute(subs, segs)
@@ -586,10 +602,12 @@ def main():
     for s in order:
         shown.setdefault(names[s], 0.0)
         shown[names[s]] += dur[s]
-    log("  分出 %d 个人：%s" % (len(shown), " · ".join(
-        "%s %d 秒 %d 字" % (nm, round(t), chars[nm]) for nm, t in shown.items())))
+    log(L("  分出 %d 个人：%s", "  Found %d speakers: %s") % (len(shown), " · ".join(
+        L("%s %d 秒 %d 字", "%s (%d s, %d chars)") % (nm, round(t), chars[nm]) for nm, t in shown.items())))
     if a.speakers <= 0 and not a.call:
-        log("  人数不对就指定：rex who 文件 人数（不重转，用已有的稿子）")
+        log(L("  人数不对就指定：rex who 文件 人数（不重转，用已有的稿子）",
+              "  Wrong number of speakers? Set it: rex who <file> <count> (no re-transcription; "
+              "uses the existing transcript)"))
     print("CHARS %d" % sum(chars.values()))
     return 0
 

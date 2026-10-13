@@ -56,6 +56,8 @@ import shutil
 import subprocess
 import sys
 
+from i18n import L
+
 MIN_TAIL = 30      # 末尾空白至少这么长才值得切。短了就是正常的收尾停顿
 KEEP = 3.0         # 切点往后多留几秒，免得切掉最后一个字的尾音
 DIGITAL = -70      # BlackHole 那一路的阈值（真静音是 -91.0）
@@ -79,8 +81,8 @@ def threshold_for(path):
     """从文件名认音源。`_sys` 和 `_both-sys` 走的是 BlackHole，其余都是真麦克风。"""
     stem = os.path.basename(path)
     if re.search(r"_(both-)?sys(\b|_|\.|-)", stem):
-        return DIGITAL, "系统声音（数字通路，静音即 -91 dB）"
-    return ACOUSTIC, "麦克风类音源（有本底噪声）"
+        return DIGITAL, L("系统声音（数字通路，静音即 -91 dB）", "system audio, a digital path where silence is -91 dB")
+    return ACOUSTIC, L("麦克风类音源（有本底噪声）", "a microphone-type source with a noise floor")
 
 
 def trailing_silence(path, dur, noise):
@@ -115,7 +117,8 @@ def parse_time(s):
     try:
         nums = [float(p) for p in parts]
     except ValueError:
-        raise SystemExit("看不懂这个时间：%s（写成 49:30 或 1:02:03 或秒数）" % s)
+        raise SystemExit(L("看不懂这个时间：%s（写成 49:30 或 1:02:03 或秒数）",
+                           "Can't parse this time: %s (write 49:30, 1:02:03 or a number of seconds)") % s)
     sec = 0.0
     for n in nums:
         sec = sec * 60 + n
@@ -182,63 +185,76 @@ def to_trash(path):
     if shutil.which("trash"):
         r = run(["trash", path])
         if r.returncode == 0 and not os.path.exists(path):
-            return "原件已放进废纸篓（访达里右键「放回原处」可以恢复）"
+            return L("原件已放进废纸篓（访达里右键「放回原处」可以恢复）",
+                     "Original moved to the Trash (Finder's Put Back restores it)")
     keep = path + ".untrimmed"
     n = 1
     while os.path.exists(keep):
         n += 1
         keep = "%s.untrimmed%d" % (path, n)
     os.rename(path, keep)
-    return "废纸篓不可用，原件改名留在原处：%s" % os.path.basename(keep)
+    return L("废纸篓不可用，原件改名留在原处：%s",
+             "Trash unavailable; original renamed and left in place: %s") % os.path.basename(keep)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="切掉录音末尾的空白")
+    ap = argparse.ArgumentParser(description=L("切掉录音末尾的空白", "Cut the trailing silence off a recording"))
     ap.add_argument("path")
-    ap.add_argument("--to", default="", help="手动指定：只保留到这个时间（49:30）")
-    ap.add_argument("--dry-run", action="store_true", help="只报告，不动文件")
+    ap.add_argument("--to", default="", help=L("手动指定：只保留到这个时间（49:30）",
+                                               "manual cut: keep only up to this time (49:30)"))
+    ap.add_argument("--dry-run", action="store_true", help=L("只报告，不动文件", "report only; don't touch the file"))
     a = ap.parse_args()
 
     f = a.path
     if not os.path.isfile(f):
-        print("没有这个文件：%s" % f)
+        print(L("没有这个文件：%s", "No such file: %s") % f)
         return 1
     dur = duration(f)
     if dur <= 0:
-        print("读不出时长：%s" % f)
+        print(L("读不出时长：%s", "Can't read the duration: %s") % f)
         return 1
 
     name = os.path.basename(f)
-    print("%s  （%s）" % (name, hms(dur)))
+    print(L("%s  （%s）", "%s  (%s)") % (name, hms(dur)))
 
     if a.to:
         cut = parse_time(a.to)
         if cut >= dur - 0.5:
-            print("  --to %s 不短于录音本身（%s），没什么可切的。" % (a.to, hms(dur)))
+            print(L("  --to %s 不短于录音本身（%s），没什么可切的。",
+                    "  --to %s is not shorter than the recording itself (%s); nothing to cut.")
+                  % (a.to, hms(dur)))
             return 0
         if cut <= 0:
-            print("  --to 必须大于 0。")
+            print(L("  --to 必须大于 0。", "  --to must be greater than 0."))
             return 1
-        print("  手动切点：只保留到 %s，后面 %s 丢掉（峰值 %s dB）"
+        print(L("  手动切点：只保留到 %s，后面 %s 丢掉（峰值 %s dB）",
+                "  Manual cut: keeping up to %s, dropping the remaining %s (peak %s dB)")
               % (hms(cut), hms(dur - cut), peak_between(f, cut, dur)))
     else:
         noise, what = threshold_for(f)
         start = trailing_silence(f, dur, noise)
         if start is None:
             tail = max(0.0, dur - 60)
-            print("  末尾没有 %d 秒以上的空白，不用切。" % MIN_TAIL)
-            print("  （按%s判，阈值 %d dB；最后 1 分钟峰值 %s dB）"
+            print(L("  末尾没有 %d 秒以上的空白，不用切。",
+                    "  No trailing silence of %d seconds or more; nothing to cut.") % MIN_TAIL)
+            print(L("  （按%s判，阈值 %d dB；最后 1 分钟峰值 %s dB）",
+                    "  (judged as %s; threshold %d dB; peak in the last minute %s dB)")
                   % (what, noise, peak_between(f, tail, dur)))
-            print("  如果确实有一段没用的尾巴，但它不是静音（比如电脑在放别的），")
-            print("  用 --to 手动指定保留到哪里，例如：rex trim %s --to 49:30" % name)
+            print(L("  如果确实有一段没用的尾巴，但它不是静音（比如电脑在放别的），",
+                    "  If there really is a useless tail that isn't silence (say, the computer was "
+                    "playing something else),"))
+            print(L("  用 --to 手动指定保留到哪里，例如：rex trim %s --to 49:30",
+                    "  use --to to set how much to keep, e.g.: rex trim %s --to 49:30") % name)
             return 0
         cut = min(dur, start + KEEP)
-        print("  末尾空白：%s → %s，共 %s（峰值 %s dB）"
+        print(L("  末尾空白：%s → %s，共 %s（峰值 %s dB）",
+                "  Trailing silence: %s → %s, %s in total (peak %s dB)")
               % (hms(start), hms(dur), hms(dur - start), peak_between(f, start, dur)))
-        print("  切到 %s（多留 %d 秒，免得切掉最后一个字的尾音）" % (hms(cut), KEEP))
+        print(L("  切到 %s（多留 %d 秒，免得切掉最后一个字的尾音）",
+                "  Cutting at %s (keeping %d extra seconds so the last word isn't clipped)") % (hms(cut), KEEP))
 
     if a.dry_run:
-        print("  --dry-run：没动文件。")
+        print(L("  --dry-run：没动文件。", "  --dry-run: file not touched."))
         return 0
 
     root, ext = os.path.splitext(f)
@@ -251,7 +267,8 @@ def main():
     if r.returncode != 0 or abs(got - cut) > 1.5:
         if os.path.exists(tmp):
             os.remove(tmp)
-        print("  ✗ 切出来的文件不对（期望 %s，实际 %s），原件没动。"
+        print(L("  ✗ 切出来的文件不对（期望 %s，实际 %s），原件没动。",
+                "  ✗ The trimmed file is wrong (expected %s, got %s); the original is untouched.")
               % (hms(cut), hms(got)))
         if r.stderr.strip():
             print("    " + r.stderr.strip().splitlines()[-1])
@@ -265,9 +282,11 @@ def main():
 
     n = trim_transcript(root, cut)
     if n:
-        print("  转写稿里切点之后的 %d 条也一并去掉了（.srt 和 .txt）" % n)
+        print(L("  转写稿里切点之后的 %d 条也一并去掉了（.srt 和 .txt）",
+                "  Transcript entries after the cut point removed as well: %d (.srt and .txt)") % n)
     elif n == 0:
-        print("  转写稿不用动（切点之后本来就没有内容）")
+        print(L("  转写稿不用动（切点之后本来就没有内容）",
+                "  Transcript unchanged (there was nothing after the cut point)"))
     return 0
 
 

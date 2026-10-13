@@ -1097,6 +1097,7 @@ rex status
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `REX_DIR` | `~/Recordings` | 录音存哪 |
+| `REX_LANG` | （跟 macOS 首选语言） | 输出语言：`zh` 或 `en`。也可以写进 `~/.config/rex/lang` 固定下来 |
 | `REX_MAX` | `21600`（6 小时） | 最长录多久，秒 |
 | `WHISPER_MODEL` | `~/.cache/whisper/ggml-large-v3-turbo-q5_0.bin` | 换识别模型 |
 | `WHISPER_VAD_MODEL` | `~/.cache/whisper/ggml-silero-v5.1.2.bin` | 换 VAD 模型 |

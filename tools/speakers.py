@@ -83,6 +83,8 @@ import subprocess
 import sys
 import tempfile
 
+from i18n import L
+
 FRAME = 0.05          # 能量包络一帧多长（秒）
 SPLIT_GAP = 1.0       # 段内停顿超过这么久、且这期间另一轨在说话，就是 whisper 把两轮并成了一段
 PAD = 0.2             # 重新定位时往段外多看这么久，whisper 的段尾偶尔收得太早
@@ -414,26 +416,33 @@ def rebuild(prefix):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="两轨转写合成对话稿")
-    ap.add_argument("--a", help="麦克风那一轨的 .srt（本机这边的人）")
-    ap.add_argument("--b", help="系统声音那一轨的 .srt（通话对方、电脑里放的）")
-    ap.add_argument("--names", default="我,对方")
+    ap = argparse.ArgumentParser(description=L("两轨转写合成对话稿",
+                                               "Merge the transcripts of two separate tracks into a "
+                                               "dialogue transcript"))
+    ap.add_argument("--a", help=L("麦克风那一轨的 .srt（本机这边的人）",
+                                  "the microphone track's .srt (the person at this computer)"))
+    ap.add_argument("--b", help=L("系统声音那一轨的 .srt（通话对方、电脑里放的）",
+                                  "the system audio track's .srt (the other party on a call, whatever the "
+                                  "computer plays)"))
+    ap.add_argument("--names", default=L("我,对方", "Me,Other"))
     ap.add_argument("--audio-a")
     ap.add_argument("--map-a", default="0:a:0")
     ap.add_argument("--audio-b")
     ap.add_argument("--map-b", default="0:a:0")
     ap.add_argument("--out")
-    ap.add_argument("--rebuild", metavar="前缀")
+    ap.add_argument("--rebuild", metavar=L("前缀", "PREFIX"))
     a = ap.parse_args()
 
     if a.rebuild:
         return 0 if rebuild(a.rebuild) else 2
     if not (a.a and a.b and a.out):
-        ap.error("要给 --a --b --out")
+        ap.error(L("要给 --a --b --out", "--a, --b and --out are required"))
 
     names = [x.strip() for x in a.names.replace("，", ",").split(",")]
     if len(names) != 2 or not all(NAME_OK.match(n) for n in names):
-        print("  名字要两个、用逗号隔开、每个不超过 12 个字、不带冒号：%s" % a.names)
+        print(L("  名字要两个、用逗号隔开、每个不超过 12 个字、不带冒号：%s",
+                "  Need two names, separated by a comma, each at most 12 characters, without colons: %s")
+              % a.names)
         return 1
     na, nb = names
 
@@ -444,29 +453,47 @@ def main():
     # 两轨的数字静音占比。空轨合出来的稿子看上去照样正常，必须在这里喊出来。
     fa, fb = silent_frac(env_a), silent_frac(env_b)
     if fb is not None and fb >= SILENT_SYS:
-        print("  ⚠ %s那一轨 %d%% 的时间是数字静音——要么对方一直没出声，要么系统声音中途断了"
+        print(L("  ⚠ %s那一轨 %d%% 的时间是数字静音——要么对方一直没出声，要么系统声音中途断了",
+                '  ⚠ The "%s" track is digital silence %d%% of the time: either the other side never spoke, '
+                'or system audio cut out partway through')
               % (nb, round(fb * 100)))
-        print("    断了最常见的原因：录到一半戴上蓝牙耳机，声音绕过了 BlackHole（rex stop 时看门狗会报「断了」）")
+        print(L("    断了最常见的原因：录到一半戴上蓝牙耳机，声音绕过了 BlackHole（rex stop 时看门狗会报「断了」）",
+                "    The most common cause of a cutout: Bluetooth headphones put on mid-recording, so the sound "
+                "bypassed BlackHole (the watchdog reports it at rex stop)"))
     if fa is not None and fa >= SILENT_MIC:
-        print("  ⚠ %s那一轨 %d%% 的时间是数字静音——真麦克风不会这样" % (na, round(fa * 100)))
-        print("    要么笔记本合着盖（合盖时内建麦克风在硬件上断开），")
-        print("    要么会议 App 把麦克风抢走了：让会议 App 和 rex 用不同的麦克风（使用说明「开会」那节）")
+        print(L("  ⚠ %s那一轨 %d%% 的时间是数字静音——真麦克风不会这样",
+                '  ⚠ The "%s" track is digital silence %d%% of the time; a real microphone never does this')
+              % (na, round(fa * 100)))
+        print(L("    要么笔记本合着盖（合盖时内建麦克风在硬件上断开），",
+                "    Either the laptop lid was closed (closing it disconnects the built-in microphone "
+                "in hardware),"))
+        print(L("    要么会议 App 把麦克风抢走了：让会议 App 和 rex 用不同的麦克风（使用说明「开会」那节）",
+                "    or a meeting app grabbed the microphone: give the meeting app and rex different "
+                'microphones (see "Meetings" in the manual)'))
 
     # 先各自重新定位（见文件头「whisper 的段会跨过对方的话」），再判回声
     ga, gb = gate(env_a, mine), gate(env_b, theirs)
     mine, sa = refine(mine, env_a, ga, env_b, gb)
     theirs, sb = refine(theirs, env_b, gb, env_a, ga)
     if sa + sb:
-        print("  拆开 %d 处（whisper 把隔着另一个人的两句话并成了一段）" % (sa + sb))
+        print(L("  拆开 %d 处（whisper 把隔着另一个人的两句话并成了一段）",
+                "  Split at %d point(s) (whisper had merged two sentences with the other person speaking "
+                "in between into one segment)") % (sa + sb))
     if env_a is None or env_b is None:
-        print("  读不到某一轨的音量，没法按声音重新定位——顺序以 whisper 的时间为准，可能有错位")
+        print(L("  读不到某一轨的音量，没法按声音重新定位——顺序以 whisper 的时间为准，可能有错位",
+                "  Couldn't read the volume of one track, so segments can't be repositioned by sound; "
+                "the order follows whisper's timestamps and may be off"))
 
     keep, dropped, used_level = drop_echo(mine, theirs, env_a)
     if dropped:
-        print("  去掉 %d 段回声（%s的声音从喇叭漏进麦克风，又被当成「%s」转了一遍）"
+        print(L("  去掉 %d 段回声（%s的声音从喇叭漏进麦克风，又被当成「%s」转了一遍）",
+                '  Removed %d echo segment(s) ("%s" leaked from the speakers into the microphone '
+                'and was transcribed a second time as "%s")')
               % (len(dropped), nb, na))
         if not used_level:
-            print("    读不到音量，这次只按文字判的，可能误杀——留意稿子里是不是少了你自己说的话")
+            print(L("    读不到音量，这次只按文字判的，可能误杀——留意稿子里是不是少了你自己说的话",
+                    "    Couldn't read the volume, so this time it judged by text alone and may have removed "
+                    "real speech: check whether anything you said is missing from the transcript"))
 
     segs = [dict(s, who=na) for s in keep] + [dict(s, who=nb) for s in theirs]
     segs.sort(key=lambda s: (s["a"], s["who"] != na))
@@ -476,11 +503,12 @@ def main():
     ca = sum(len(PUNCT.sub("", s["text"])) for s in keep)
     cb = sum(len(PUNCT.sub("", s["text"])) for s in theirs)
     if ca + cb:
-        print("  %s %d 字（%d%%）· %s %d 字（%d%%）"
+        print(L("  %s %d 字（%d%%）· %s %d 字（%d%%）", "  %s %d chars (%d%%) · %s %d chars (%d%%)")
               % (na, ca, round(100 * ca / (ca + cb)), nb, cb, round(100 * cb / (ca + cb))))
     # 只有一边是空的才单独说；两边都空由 rex.sh 报一句「两轨都没转出字」
     if bool(mine) != bool(theirs):
-        print("  ○ %s那一轨没转出字（VAD 没找到人声）" % (na if not mine else nb))
+        print(L("  ○ %s那一轨没转出字（VAD 没找到人声）", '  ○ The "%s" track produced no text (VAD found no speech)')
+              % (na if not mine else nb))
     print("CHARS %d" % (ca + cb))
     return 0
 

@@ -73,6 +73,18 @@ import Foundation
 
 func errln(_ s: String) { FileHandle.standardError.write((s + "\n").data(using: .utf8)!) }
 
+// 输出语言：rex.sh 导出 REX_LANG（en / zh）；单独跑时看 ~/.config/rex/lang，再看系统首选语言（中文 → zh，其余 → en）
+let EN: Bool = {
+    let env = ProcessInfo.processInfo.environment["REX_LANG"] ?? ""
+    if env == "en" || env == "zh" { return env == "en" }
+    if let f = try? String(contentsOfFile: NSHomeDirectory() + "/.config/rex/lang", encoding: .utf8) {
+        let v = f.trimmingCharacters(in: .whitespacesAndNewlines)
+        if v == "en" || v == "zh" { return v == "en" }
+    }
+    return !(Locale.preferredLanguages.first ?? "en").hasPrefix("zh")
+}()
+func L(_ zh: String, _ en: String) -> String { EN ? en : zh }
+
 // ---------------------------------------------------------------- 权限：自己负责
 //
 // macOS 的隐私授权（TCC）记在「负责的那个 App」头上：从终端起的命令行程序，负责人是终端。
@@ -123,7 +135,7 @@ func respawnDisclaimed() {
     var child: pid_t = 0
     let rc = posix_spawn(&child, exe, nil, &attr, argv, envp)
     guard rc == 0 else {
-        errln("audiocap：没法以自己的名义重起（\(rc)），就在本进程里跑——授权会记在终端头上"); return
+        errln(L("audiocap：没法以自己的名义重起（\(rc)），就在本进程里跑——授权会记在终端头上", "audiocap: couldn\'t relaunch as its own responsible process (\(rc)); running in this process, so permissions go to the terminal")); return
     }
     relayChild = child
     for sig in [SIGINT, SIGTERM] { signal(sig) { s in if relayChild > 0 { kill(relayChild, s) } } }
@@ -136,21 +148,21 @@ respawnDisclaimed()
 
 // 麦克风：公开 API。没问过就问（弹系统提示、等答复）；拒绝了就明说，绝不录一段全零出来。
 func micAuthorized() -> Bool {
-    let fix = "系统设置 → 隐私与安全性 → 麦克风 → 打开「rex 录音采集」"
+    let fix = L("系统设置 → 隐私与安全性 → 麦克风 → 打开「rex 录音采集」", "System Settings → Privacy & Security → Microphone → turn on \"rex 录音采集\"")
     switch AVCaptureDevice.authorizationStatus(for: .audio) {
     case .authorized: return true
     case .notDetermined:
-        errln("audiocap：第一次用麦克风，等你在屏幕上的提示里点「允许」……")
+        errln(L("audiocap：第一次用麦克风，等你在屏幕上的提示里点「允许」……", "audiocap: first use of the microphone; waiting for you to click Allow in the prompt…"))
         let sem = DispatchSemaphore(value: 0)
         var ok = false
         AVCaptureDevice.requestAccess(for: .audio) { ok = $0; sem.signal() }
         if sem.wait(timeout: .now() + 120) == .timedOut {
-            errln("audiocap：等了两分钟没人点，先不录。再开一次会再问。"); return false
+            errln(L("audiocap：等了两分钟没人点，先不录。再开一次会再问。", "audiocap: no answer after two minutes, not recording. It will ask again next time.")); return false
         }
-        if !ok { errln("audiocap：麦克风被拒绝了，这一路没法录。\(fix)") }
+        if !ok { errln(L("audiocap：麦克风被拒绝了，这一路没法录。\(fix)", "audiocap: microphone access was denied, so this track can\'t be recorded. \(fix)")) }
         return ok
     default:
-        errln("audiocap：这个程序没有麦克风权限，这一路没法录。\(fix)"); return false
+        errln(L("audiocap：这个程序没有麦克风权限，这一路没法录。\(fix)", "audiocap: this program has no microphone permission, so this track can\'t be recorded. \(fix)")); return false
     }
 }
 
@@ -178,16 +190,16 @@ func sysAudioRequest() -> Bool {
     return sem.wait(timeout: .now() + 120) == .success && ok
 }
 func sysAudioAuthorized(request: Bool) -> Bool {
-    let fix = "系统设置 → 隐私与安全性 → 屏幕与系统录音 → 「仅系统录音」→ 打开「rex 录音采集」"
+    let fix = L("系统设置 → 隐私与安全性 → 屏幕与系统录音 → 「仅系统录音」→ 打开「rex 录音采集」", "System Settings → Privacy & Security → Screen & System Audio Recording → \"System Audio Recording Only\" → turn on \"rex 录音采集\"")
     var st = sysAudioPreflight()
     if st == 2 && request {
-        errln("audiocap：第一次录系统声音，等你在屏幕上的提示里点「允许」……")
+        errln(L("audiocap：第一次录系统声音，等你在屏幕上的提示里点「允许」……", "audiocap: first system-audio recording; waiting for you to click Allow in the prompt…"))
         st = sysAudioRequest() ? 0 : sysAudioPreflight()
     }
     switch st {
     case 0, -1: return true
-    case 1: errln("audiocap：录系统声音被拒绝过。\(fix)"); return false
-    default: errln("audiocap：录系统声音还没授权。跑一次 rex check sys 会弹授权提示；或者 \(fix)"); return false
+    case 1: errln(L("audiocap：录系统声音被拒绝过。\(fix)", "audiocap: system audio recording was denied. \(fix)")); return false
+    default: errln(L("audiocap：录系统声音还没授权。跑一次 rex check sys 会弹授权提示；或者 \(fix)", "audiocap: system audio recording isn\'t authorized yet. Run rex check sys to get the prompt, or \(fix)")); return false
     }
 }
 
@@ -297,7 +309,7 @@ func startKeepAlive(clockUID: String?) -> Bool {
     // 内建扬声器的 UID 在 Mac 上是固定的 BuiltInSpeakerDevice；clockDeviceUID 按「内建、只有输出」挑，插着有线耳机时
     // 可能挑到耳机那个设备，拔掉就没了。所以先按固定 UID 找，再退回时钟设备，再退回默认输出
     guard let d = deviceForUID("BuiltInSpeakerDevice") ?? clockUID.flatMap(deviceForUID) ?? defaultOutputDevice() else {
-        errln("audiocap：找不到可以写静音的输出设备——没放声音时系统声音这一路会没数据"); return false
+        errln(L("audiocap：找不到可以写静音的输出设备——没放声音时系统声音这一路会没数据", "audiocap: no output device to write silence to; the system-audio track gets no data while nothing is playing")); return false
     }
     var p: AudioDeviceIOProcID? = nil
     let st = AudioDeviceCreateIOProcIDWithBlock(&p, d, nil) { _, _, _, outData, _ in
@@ -306,11 +318,11 @@ func startKeepAlive(clockUID: String?) -> Bool {
         }
     }
     guard st == noErr, let proc = p else {
-        errln("audiocap：往「\(deviceName(d))」写静音没起来（\(st)）——没放声音时系统声音这一路会没数据"); return false
+        errln(L("audiocap：往「\(deviceName(d))」写静音没起来（\(st)）——没放声音时系统声音这一路会没数据", "audiocap: couldn\'t start writing silence to \"\(deviceName(d))\" (\(st)); the system-audio track gets no data while nothing is playing")); return false
     }
     guard AudioDeviceStart(d, proc) == noErr else {
         AudioDeviceDestroyIOProcID(d, proc)
-        errln("audiocap：「\(deviceName(d))」启动不了——没放声音时系统声音这一路会没数据"); return false
+        errln(L("audiocap：「\(deviceName(d))」启动不了——没放声音时系统声音这一路会没数据", "audiocap: \"\(deviceName(d))\" won\'t start; the system-audio track gets no data while nothing is playing")); return false
     }
     keepAliveDev = d
     keepAliveProc = proc
@@ -336,7 +348,7 @@ func openSystemTap(keepAlive: Bool) -> AudioDeviceID? {
     var tap = AudioObjectID(kAudioObjectUnknown)
     var err = AudioHardwareCreateProcessTap(desc, &tap)
     guard err == noErr, tap != kAudioObjectUnknown else {
-        errln("audiocap：建不了系统声音的 tap（\(err)）"); return nil
+        errln(L("audiocap：建不了系统声音的 tap（\(err)）", "audiocap: couldn\'t create the system audio tap (\(err))")); return nil
     }
     tapID = tap
     var dict: [String: Any] = [
@@ -357,13 +369,13 @@ func openSystemTap(keepAlive: Bool) -> AudioDeviceID? {
     err = AudioHardwareCreateAggregateDevice(dict as CFDictionary, &agg)
     guard err == noErr, agg != kAudioObjectUnknown else {
         AudioHardwareDestroyProcessTap(tap); tapID = AudioObjectID(kAudioObjectUnknown)
-        errln("audiocap：建不了系统声音的聚合设备（\(err)）"); return nil
+        errln(L("audiocap：建不了系统声音的聚合设备（\(err)）", "audiocap: couldn\'t create the aggregate device for system audio (\(err))")); return nil
     }
     tapAggID = agg
     // 写静音是这条路成立的前提（没人写 tap 就不转），起不来就整条路算失败（退出码 11），别留一条「开着却不出数据」的
     if keepAlive && !startKeepAlive(clockUID: clk) {
         closeSystemTap()
-        errln("audiocap：系统声音这一路没法保持运转，不录了（退出码 11）"); exit(11)
+        errln(L("audiocap：系统声音这一路没法保持运转，不录了（退出码 11）", "audiocap: can\'t keep the system-audio track running, not recording (exit code 11)")); exit(11)
     }
     return agg
 }
@@ -425,7 +437,7 @@ if args.first == "--list" {
 }
 let systemMode = args.first == "--system"
 guard systemMode || (args.first.map { !$0.hasPrefix("--") } ?? false) else {
-    errln("用法：audiocap <设备名（正则）>|--system [--info] [--seconds N] [--level 文件] [--request]"); exit(64)
+    errln(L("用法：audiocap <设备名（正则）>|--system [--info] [--seconds N] [--level 文件] [--request]", "usage: audiocap <device name (regex)>|--system [--info] [--seconds N] [--level FILE] [--request]")); exit(64)
 }
 let pattern = args[0]
 let infoOnly = args.contains("--info")
@@ -437,7 +449,7 @@ if let i = args.firstIndex(of: "--level"), i + 1 < args.count { levelPath = args
 // 退出码：8 麦克风没权限、9 系统声音没权限——rex.sh 据此决定是弹框等、还是退回别的路
 var picked: AudioDeviceID? = nil
 if systemMode {
-    guard #available(macOS 14.2, *) else { errln("audiocap：--system 要 macOS 14.2 以上"); exit(6) }
+    guard #available(macOS 14.2, *) else { errln(L("audiocap：--system 要 macOS 14.2 以上", "audiocap: --system needs macOS 14.2 or later")); exit(6) }
     if !sysAudioAuthorized(request: args.contains("--request")) { exit(9) }
     picked = openSystemTap(keepAlive: !infoOnly)
     if picked == nil { exit(7) }
@@ -446,23 +458,23 @@ if systemMode {
     picked = findInput(pattern)
 }
 guard let dev = picked else {
-    errln("audiocap：找不到能录音的设备「\(pattern)」。audiocap --list 看看有哪些。"); exit(2)
+    errln(L("audiocap：找不到能录音的设备「\(pattern)」。audiocap --list 看看有哪些。", "audiocap: no input device matching \"\(pattern)\". Run audiocap --list to see what is available.")); exit(2)
 }
 let rate = nominalRate(dev)
 let ch = inputChannels(dev)
-let devLabel = systemMode ? "系统声音（系统音频接口）" : deviceName(dev)
+let devLabel = systemMode ? L("系统声音（系统音频接口）", "System audio (system audio tap)") : deviceName(dev)
 // 校验放在 --info 的输出之前：「探测通过」必须等于「采集能起来」，不然 rex.sh 会把 "48000 0 …" 交给 ffmpeg
 guard ch > 0, rate > 0 else {
-    errln("audiocap：「\(devLabel)」没有可读的输入（\(ch) 声道、\(rate) Hz）"); closeSystemTap(); exit(3)
+    errln(L("audiocap：「\(devLabel)」没有可读的输入（\(ch) 声道、\(rate) Hz）", "audiocap: \"\(devLabel)\" has no readable input (\(ch) channels, \(rate) Hz)")); closeSystemTap(); exit(3)
 }
 guard inputIsFloat32(dev) else {
-    errln("audiocap：「\(devLabel)」的输入不是 32 位浮点，这个工具不处理，免得写出一段噪声。"); closeSystemTap(); exit(3)
+    errln(L("audiocap：「\(devLabel)」的输入不是 32 位浮点，这个工具不处理，免得写出一段噪声。", "audiocap: \"\(devLabel)\" does not deliver 32-bit float; not supported (it would write noise).")); closeSystemTap(); exit(3)
 }
 // 多个 stream、其中又有多声道的 stream：下面拼交错的那段只会按「一块一个声道」拼，拼出来是错位的。少见（自建聚合、
 // 某些多 stream 声卡），直接拒绝，比写出一段错位的录音好
 let shape = inputBufferShape(dev)
 guard shape.buffers <= 1 || shape.maxCh <= 1 else {
-    errln("audiocap：「\(devLabel)」有 \(shape.buffers) 个输入 stream 且其中有多声道的，这个工具不处理这种设备"); closeSystemTap(); exit(3)
+    errln(L("audiocap：「\(devLabel)」有 \(shape.buffers) 个输入 stream 且其中有多声道的，这个工具不处理这种设备", "audiocap: \"\(devLabel)\" has \(shape.buffers) input streams, some multichannel; this kind of device is not supported")); closeSystemTap(); exit(3)
 }
 if infoOnly { print(String(format: "%.0f %d %@", rate, ch, devLabel)); closeSystemTap(); exit(0) }
 
@@ -549,7 +561,7 @@ let st = AudioDeviceCreateIOProcIDWithBlock(&procID, dev, nil) { _, inData, _, _
         push(scratch, frames * ch)
     }
 }
-guard st == noErr, let pid = procID else { errln("audiocap：建不了 IOProc（\(st)）"); exit(4) }
+guard st == noErr, let pid = procID else { errln(L("audiocap：建不了 IOProc（\(st)）", "audiocap: couldn\'t create the IOProc (\(st))")); exit(4) }
 
 signal(SIGPIPE, SIG_IGN)
 var stopping = false
@@ -593,11 +605,11 @@ let aliveSt = AudioObjectAddPropertyListenerBlock(dev, &aliveAddr, DispatchQueue
     let st = AudioObjectGetPropertyData(dev, &a, 0, nil, &sz, &alive)
     if st != noErr || alive == 0 {
         deviceGone = true
-        errln("audiocap：设备「\(deviceName(dev))」断开了，停止采集（已录的部分会正常保存）")
+        errln(L("audiocap：设备「\(deviceName(dev))」断开了，停止采集（已录的部分会正常保存）", "audiocap: device \"\(deviceName(dev))\" disconnected, stopping capture (what was recorded is saved)"))
         kill(getpid(), SIGTERM)
     }
 }
-if aliveSt != noErr { errln("audiocap：装不上设备存活监听（\(aliveSt)），设备断开只能靠帧数看门狗发现") }
+if aliveSt != noErr { errln(L("audiocap：装不上设备存活监听（\(aliveSt)），设备断开只能靠帧数看门狗发现", "audiocap: couldn\'t install the device-alive listener (\(aliveSt)); a disconnect will only be caught by the frame watchdog")) }
 // 写静音那台设备没了（只在退回默认输出时可能发生）：tap 跟着停转，这一路没意义了，退出让另一路接着录
 if keepAliveDev != kAudioObjectUnknown {
     var ka = addr(kAudioDevicePropertyDeviceIsAlive)
@@ -607,7 +619,7 @@ if keepAliveDev != kAudioObjectUnknown {
         var sz = UInt32(MemoryLayout<UInt32>.size)
         var a = addr(kAudioDevicePropertyDeviceIsAlive)
         if AudioObjectGetPropertyData(keepAliveDev, &a, 0, nil, &sz, &alive) != noErr || alive == 0 {
-            errln("audiocap：写静音的输出设备没了，系统声音这一路停止（退出码 11）")
+            errln(L("audiocap：写静音的输出设备没了，系统声音这一路停止（退出码 11）", "audiocap: the output device used for silence is gone, stopping the system-audio track (exit code 11)"))
             DispatchQueue.main.async { shutdown(11) }
         }
     }
@@ -618,7 +630,7 @@ AudioObjectAddPropertyListenerBlock(dev, &rateAddr, DispatchQueue.global()) { _,
     if shuttingDown { return }
     let r2 = nominalRate(dev)
     if r2 > 0 && abs(r2 - rate) > 0.5 {
-        errln(String(format: "audiocap：「%@」的采样率从 %.0f 变成了 %.0f，这一路停止（退出码 12）", devLabel, rate, r2))
+        errln(String(format: L("audiocap：「%@」的采样率从 %.0f 变成了 %.0f，这一路停止（退出码 12）", "audiocap: \"%@\" sample rate changed from %.0f to %.0f, stopping this track (exit code 12)"), devLabel, rate, r2))
         DispatchQueue.main.async { shutdown(12) }
     }
 }
@@ -631,7 +643,7 @@ func shutdown(_ code: Int32) -> Never {
     stopping = true
     _ = finished.wait(timeout: .now() + 10)   // 把缓冲里剩下的写完
     if overrun > 0 {
-        errln(String(format: "audiocap：⚠ 缓冲溢出，丢了 %d 帧（%.2f 秒）——下游写得太慢", overrun, Double(overrun) / rate))
+        errln(String(format: L("audiocap：⚠ 缓冲溢出，丢了 %d 帧（%.2f 秒）——下游写得太慢", "audiocap: ⚠ buffer overrun, dropped %d frames (%.2f s); the consumer is too slow"), overrun, Double(overrun) / rate))
     }
     exit(code)
 }
@@ -645,8 +657,8 @@ for sig in [SIGINT, SIGTERM] {
     signalSources.append(src)
 }
 
-guard AudioDeviceStart(dev, pid) == noErr else { errln("audiocap：设备启动失败"); closeSystemTap(); exit(5) }
-errln(String(format: "audiocap：在读「%@」%.0f Hz %d 声道", devLabel, rate, ch))
+guard AudioDeviceStart(dev, pid) == noErr else { errln(L("audiocap：设备启动失败", "audiocap: failed to start the device")); closeSystemTap(); exit(5) }
+errln(String(format: L("audiocap：在读「%@」%.0f Hz %d 声道", "audiocap: reading \"%@\" %.0f Hz %d ch"), devLabel, rate, ch))
 writer.start()
 
 // 帧数看门狗：开头 6 秒内一帧都没来（蓝牙麦克风切免提模式要一两秒，留足），或者中途 4 秒没有新帧（设备停转、
@@ -663,8 +675,8 @@ wd.setEventHandler {
     if got != wdLast { wdLast = got; wdSince = DispatchTime.now(); return }
     let quiet = Double(DispatchTime.now().uptimeNanoseconds - wdSince.uptimeNanoseconds) / 1e9
     if (got == 0 && quiet >= 6) || (got > 0 && quiet >= 4) {
-        errln(got == 0 ? "audiocap：「\(devLabel)」启动了，但 6 秒内一帧都没交出来——这一路起不来"
-                       : "audiocap：「\(devLabel)」\(Int(quiet)) 秒没有新帧，这一路停转了，停止采集")
+        errln(got == 0 ? L("audiocap：「\(devLabel)」启动了，但 6 秒内一帧都没交出来——这一路起不来", "audiocap: \"\(devLabel)\" started but delivered no frames within 6 s; this track can\'t start")
+                       : L("audiocap：「\(devLabel)」\(Int(quiet)) 秒没有新帧，这一路停转了，停止采集", "audiocap: \"\(devLabel)\" delivered no new frames for \(Int(quiet)) s; the track has stalled, stopping capture"))
         shutdown(10)
     }
 }
@@ -701,7 +713,7 @@ if let lp = levelPath {
 let parentAtStart = pid_t(ProcessInfo.processInfo.environment["REX_AUDIOCAP_PARENT"] ?? "") ?? getppid()
 DispatchQueue.global().async {
     while !pipeBroken {
-        if isRelayChild && getppid() != parentAtStart { errln("audiocap：父进程没了，停止采集"); break }
+        if isRelayChild && getppid() != parentAtStart { errln(L("audiocap：父进程没了，停止采集", "audiocap: parent process is gone, stopping capture")); break }
         usleep(50000)
     }
     DispatchQueue.main.async { shutdown(0) }

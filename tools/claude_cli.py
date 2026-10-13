@@ -37,6 +37,8 @@ import re
 import subprocess
 import threading
 
+from i18n import EN, L
+
 STRIP_PREFIX = "ANTHROPIC_"
 STRIP = {"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_SUBAGENT_MODEL",
          "CLAUDE_CODE_EFFORT_LEVEL"}
@@ -47,10 +49,15 @@ STRIP = {"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_SUBAG
 # 状态码只认紧跟在「API Error:」后面的：崩溃栈里的 cli.js:402:15、「401 ms」都曾被当成账户错误（2026-10-13
 # 复核实测）。429（rate limit）和 Context limit 不算账户级：那是可以重试的单份失败
 ACCOUNT = [
-    (r"Not logged in|Please run /login|Invalid API key", "claude 命令行还没登录 Claude 账号：终端里跑 rex login"),
-    (r"API Error: 402\b|Insufficient Balance|credit balance is too low", "账户余额不足"),
-    (r"usage limit reached|hit your (session|usage|weekly|monthly) limit|out of extra usage", "到了用量上限"),
-    (r"API Error: 401\b|invalid x-api-key|authentication_error", "登录失效：终端里跑 rex login 重新登录"),
+    (r"Not logged in|Please run /login|Invalid API key",
+     L("claude 命令行还没登录 Claude 账号：终端里跑 rex login",
+       "The claude CLI isn't logged in to a Claude account: run rex login in a terminal")),
+    (r"API Error: 402\b|Insufficient Balance|credit balance is too low",
+     L("账户余额不足", "Account balance too low")),
+    (r"usage limit reached|hit your (session|usage|weekly|monthly) limit|out of extra usage",
+     L("到了用量上限", "Usage limit reached")),
+    (r"API Error: 401\b|invalid x-api-key|authentication_error",
+     L("登录失效：终端里跑 rex login 重新登录", "Login expired: run rex login in a terminal to log in again")),
 ]
 
 
@@ -83,10 +90,14 @@ def tally(obj):
 
 
 def models():
-    return "、".join(sorted(_used["models"])) or "claude 命令行默认模型"
+    return L("、", ", ").join(sorted(_used["models"])) or L("claude 命令行默认模型", "the claude CLI's default model")
 
 
 def wan(n):
+    if EN:                              # 英文没有「万」：12.3k、1.2M
+        if n >= 1000000:
+            return "%.1fM" % (n / 1000000.0)
+        return "%.1fk" % (n / 1000.0) if n >= 10000 else str(n)
     return "%.1f 万" % (n / 10000.0) if n >= 10000 else str(n)
 
 
@@ -97,13 +108,22 @@ def usage_numbers():
     return {k: _used[k] for k in ("calls", "in", "out", "cost")}
 
 
+def usage_text(u):
+    """{calls, in, out, cost} → 「9 次调用 · 送进去 12.3 万 token · 输出 4.5 万 · 折合 API 价约 $3.20」。
+    usage_note() 和校对报告（几次运行加起来）共用这一种写法。"""
+    if EN:
+        return "%d %s · %s tokens in · %s out · about $%.2f at API prices" % (
+            u["calls"], "call" if u["calls"] == 1 else "calls", wan(u["in"]), wan(u["out"]), u["cost"])
+    return "%d 次调用 · 送进去 %s token · 输出 %s · 折合 API 价约 $%.2f" % (
+        u["calls"], wan(u["in"]), wan(u["out"]), u["cost"])
+
+
 def usage_note():
     """「9 次调用 · 送进去 12.3 万 token · 输出 4.5 万 · 折合 API 价约 $3.20」，没调用过就是空串。"""
     u = usage_numbers()
     if not u:
         return ""                       # 没拿到 usage 就不写，免得写成「0 token」
-    return "%d 次调用 · 送进去 %s token · 输出 %s · 折合 API 价约 $%.2f" % (
-        u["calls"], wan(u["in"]), wan(u["out"]), u["cost"])
+    return usage_text(u)
 
 
 def env():
@@ -115,7 +135,7 @@ def env():
 def account_error(text):
     for pat, msg in ACCOUNT:
         if re.search(pat, text, re.I):
-            return "%s（%s）" % (msg, text.strip().splitlines()[0][:100]) if text.strip() else msg
+            return L("%s（%s）", "%s (%s)") % (msg, text.strip().splitlines()[0][:100]) if text.strip() else msg
     return None
 
 
@@ -135,7 +155,7 @@ def run(args, text, timeout, cwd=None):
 
     账户层面的失败抛 AccountError，别的失败抛 RuntimeError。"""
     if _abort.is_set():
-        raise RuntimeError("已经停下了")
+        raise RuntimeError(L("已经停下了", "Already stopped"))
     p = subprocess.Popen(["claude", "-p", "--output-format", "json"] + args, stdin=subprocess.PIPE,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd, env=env())
     with _lock:
@@ -147,7 +167,7 @@ def run(args, text, timeout, cwd=None):
     except subprocess.TimeoutExpired:
         p.kill()
         p.communicate()
-        raise RuntimeError("等了 %d 秒没回来" % timeout)
+        raise RuntimeError(L("等了 %d 秒没回来", "No reply after %d seconds") % timeout)
     finally:
         with _lock:
             _live.discard(p)
@@ -155,11 +175,12 @@ def run(args, text, timeout, cwd=None):
         obj = json.loads(out)
     except ValueError:
         # 两边的尾巴都带上：stderr 有东西不等于 stdout 里没有真正的错误
-        msg = "；".join(t for t in ((err or "").strip()[-300:], (out or "").strip()[-300:]) if t) or "（被停掉了，没有输出）"
+        msg = L("；", "; ").join(t for t in ((err or "").strip()[-300:], (out or "").strip()[-300:]) if t) \
+            or L("（被停掉了，没有输出）", "(stopped, no output)")
         why = account_error(msg)
         if why:
             raise AccountError(why)
-        raise RuntimeError("claude 没返回 JSON：%s" % msg)
+        raise RuntimeError(L("claude 没返回 JSON：%s", "claude didn't return JSON: %s") % msg)
     res = (obj.get("result") or "").strip()
     if obj.get("is_error") or re.match(r"(API Error|Not logged in|Invalid API key)", res):
         tally(obj)                      # 报错的那次也花了额度，照记
@@ -167,6 +188,7 @@ def run(args, text, timeout, cwd=None):
         why = account_error(detail)
         if why:
             raise AccountError(why)
-        raise RuntimeError("claude 报错：%s" % (detail or "（没有说明）")[-300:])
+        raise RuntimeError(L("claude 报错：%s", "claude reported an error: %s")
+                           % (detail or L("（没有说明）", "(no details)"))[-300:])
     tally(obj)
     return obj

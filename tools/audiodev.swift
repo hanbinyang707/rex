@@ -121,6 +121,18 @@ func defaultDevice(_ sel: AudioObjectPropertySelector) -> AudioObjectID? {
     return v
 }
 
+// 输出语言：rex.sh 导出 REX_LANG（en / zh）；单独跑时看 ~/.config/rex/lang，再看系统首选语言
+let EN: Bool = {
+    let env = ProcessInfo.processInfo.environment["REX_LANG"] ?? ""
+    if env == "en" || env == "zh" { return env == "en" }
+    if let f = try? String(contentsOfFile: NSHomeDirectory() + "/.config/rex/lang", encoding: .utf8) {
+        let v = f.trimmingCharacters(in: .whitespacesAndNewlines)
+        if v == "en" || v == "zh" { return v == "en" }
+    }
+    return !(Locale.preferredLanguages.first ?? "en").hasPrefix("zh")
+}()
+func L(_ zh: String, _ en: String) -> String { EN ? en : zh }
+
 func fail(_ msg: String) -> Never {
     FileHandle.standardError.write(("audiodev: " + msg + "\n").data(using: .utf8)!)
     exit(1)
@@ -129,7 +141,7 @@ func fail(_ msg: String) -> Never {
 // ------------------------------------------------------------------ 入口
 
 let argv = Array(CommandLine.arguments.dropFirst())
-guard let cmd = argv.first else { fail("要一个子命令：list / default / use / members / make / destroy") }
+guard let cmd = argv.first else { fail(L("要一个子命令：list / default / use / members / make / destroy", "need a subcommand: list / default / use / members / make / destroy")) }
 let rest = Array(argv.dropFirst())
 
 switch cmd {
@@ -151,36 +163,36 @@ case "list-in":
 case "default":
     guard let id = defaultDevice(kAudioHardwarePropertyDefaultOutputDevice),
           let u = cfString(id, kAudioDevicePropertyDeviceUID)
-    else { fail("读不到当前输出设备") }
+    else { fail(L("读不到当前输出设备", "can\'t read the current output device")) }
     print(u)
 
 case "default-in":
     // 打印**名字**不是 UID：调用方要拿它去 avfoundation 的设备表里按名字匹配。
     guard let id = defaultDevice(kAudioHardwarePropertyDefaultInputDevice),
           let n = cfString(id, kAudioObjectPropertyName)
-    else { fail("读不到当前输入设备") }
+    else { fail(L("读不到当前输入设备", "can\'t read the current input device")) }
     print(n)
 
 case "name":
-    guard let u = rest.first, let id = deviceID(uid: u) else { fail("没有这个 UID") }
+    guard let u = rest.first, let id = deviceID(uid: u) else { fail(L("没有这个 UID", "no such UID")) }
     print(cfString(id, kAudioObjectPropertyName) ?? "?")
 
 case "use":
-    guard let u = rest.first, let id = deviceID(uid: u) else { fail("没有这个 UID：\(rest.first ?? "")") }
+    guard let u = rest.first, let id = deviceID(uid: u) else { fail(L("没有这个 UID：\(rest.first ?? "")", "no such UID: \(rest.first ?? "")")) }
     var a = addr(kAudioHardwarePropertyDefaultOutputDevice)
     var v = id
     let st = AudioObjectSetPropertyData(SYS, &a, 0, nil, UInt32(MemoryLayout<AudioObjectID>.size), &v)
-    if st != noErr { fail("切换失败，OSStatus \(st)") }
+    if st != noErr { fail(L("切换失败，OSStatus \(st)", "switch failed, OSStatus \(st)")) }
 
 case "members":
-    guard let u = rest.first, let id = deviceID(uid: u) else { fail("没有这个 UID") }
+    guard let u = rest.first, let id = deviceID(uid: u) else { fail(L("没有这个 UID", "no such UID")) }
     members(id).forEach { print($0) }
 
 case "make":
     // make <名字> <主时钟uid> <成员uid...>
-    guard rest.count >= 3 else { fail("用法：make <名字> <主时钟uid> <成员uid...>") }
+    guard rest.count >= 3 else { fail(L("用法：make <名字> <主时钟uid> <成员uid...>", "usage: make <name> <clock-uid> <member-uid...>")) }
     let name = rest[0], master = rest[1], subs = Array(rest.dropFirst(2))
-    guard subs.contains(master) else { fail("主时钟必须也在成员里") }
+    guard subs.contains(master) else { fail(L("主时钟必须也在成员里", "the clock device must also be a member")) }
 
     let uid = "rex.passthru." + UUID().uuidString
     let desc: [String: Any] = [
@@ -200,15 +212,15 @@ case "make":
     ]
     var newID: AudioObjectID = 0
     let st = AudioHardwareCreateAggregateDevice(desc as CFDictionary, &newID)
-    if st != noErr || newID == 0 { fail("建不出多输出设备，OSStatus \(st)") }
+    if st != noErr || newID == 0 { fail(L("建不出多输出设备，OSStatus \(st)", "couldn\'t create the multi-output device, OSStatus \(st)")) }
     print(uid)
 
 case "destroy":
-    guard let u = rest.first else { fail("要一个 UID") }
+    guard let u = rest.first else { fail(L("要一个 UID", "need a UID")) }
     guard let id = deviceID(uid: u) else { exit(0) }   // 已经不在了，当成功
     let st = AudioHardwareDestroyAggregateDevice(id)
-    if st != noErr { fail("删不掉，OSStatus \(st)") }
+    if st != noErr { fail(L("删不掉，OSStatus \(st)", "couldn\'t delete it, OSStatus \(st)")) }
 
 default:
-    fail("不认识的子命令：\(cmd)")
+    fail(L("不认识的子命令：\(cmd)", "unknown subcommand: \(cmd)"))
 }

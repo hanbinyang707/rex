@@ -52,6 +52,7 @@ TOOLS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, TOOLS)
 import claude_cli  # noqa: E402
 import proofread  # noqa: E402
+from i18n import L, EN  # noqa: E402
 
 REX_DIR = os.environ.get("REX_DIR") or os.path.expanduser("~/Recordings")
 INBOX = os.environ.get("REX_INBOX") or os.path.join(REX_DIR, "收件箱")
@@ -74,7 +75,9 @@ MEDIA_TYPE = {".m4a": "audio/mp4", ".m4b": "audio/mp4", ".mp4": "video/mp4", ".m
 # 本工具起的名字：日期_时刻_来源[-分轨][_关键词]
 NAME = re.compile(r"^(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})(\d{2})?_(mic|sys|both|phone|drop-[^_]*)"
                   r"(?:-(mic|sys))?(?:_(.+))?$")
-SOURCE = {"mic": "麦克风", "sys": "电脑声音", "both": "通话", "phone": "手机"}
+# 来源只是显示用的标签，跟着界面语言走。app.js 拿它比较时用同一对中英文（T('导入', 'Imported')），别在一边单改
+SOURCE = {"mic": L("麦克风", "Microphone"), "sys": L("电脑声音", "Computer audio"), "both": L("通话", "Call"),
+          "phone": L("手机", "Phone")}
 DIALOGUE = re.compile(r"^\[[0-9:]+\] ([^：]{1,12})：")
 
 _dur_lock = threading.Lock()
@@ -85,7 +88,9 @@ def log(msg):
 
 
 def child_env():
-    env = dict(os.environ, LANG="en_US.UTF-8", LC_ALL="en_US.UTF-8", REX_DIR=REX_DIR)
+    # REX_LANG 显式传下去：录音、处理排出去的 rex.sh 回的话（页面上直接显示）和界面同一种语言，
+    # 哪怕服务起来以后 ~/.config/rex/lang 又改过
+    env = dict(os.environ, LANG="en_US.UTF-8", LC_ALL="en_US.UTF-8", REX_DIR=REX_DIR, REX_LANG="en" if EN else "zh")
     return env
 
 
@@ -132,7 +137,7 @@ def durations(paths):
                     json.dump(cache, fh, ensure_ascii=False)
                 os.replace(tmp, _dur_path())
             except OSError as e:            # 缓存写不进去（磁盘满、目录不可写）不该让整个 /api/state 报 500
-                log("时长缓存没写进去：%s" % e)
+                log(L("时长缓存没写进去：%s", "Couldn't write the duration cache: %s") % e)
         return out
 
 
@@ -144,7 +149,7 @@ def parse_name(key):
         return None
     y, mo, d, hh, mm, ss, src, track, kw = m.groups()
     if src.startswith("drop-"):
-        source, origin = "导入", src[5:]
+        source, origin = L("导入", "Imported"), src[5:]
     else:
         source, origin = SOURCE.get(src, src), ""
     kw = (kw or "").replace("-", " · ")
@@ -166,8 +171,10 @@ def proof_summary(prefix):
     md = prefix + ".校对.md"
     if os.path.exists(md):
         s = open(md, encoding="utf-8").read(3000)
-        m = re.search(r"改了 \*\*(\d+)\*\* 处 · 拿不准、没改 \*\*(\d+)\*\* 处", s)
-        f = re.search(r"(\d+) 份校对失败", s)
+        # 报告是按写它那会儿的语言写的，和现在界面是什么语言无关：中文、英文的摘要行都认
+        m = (re.search(r"改了 \*\*(\d+)\*\* 处 · 拿不准、没改 \*\*(\d+)\*\* 处", s)
+             or re.search(r"Changed: \*\*(\d+)\*\* · Uncertain, not changed: \*\*(\d+)\*\*", s))
+        f = re.search(r"(\d+) 份校对失败", s) or re.search(r"Lines not proofread yet: (\d+)", s)
         if m:
             return {"applied": int(m.group(1)), "unsure": int(m.group(2)), "failed": int(f.group(1)) if f else 0}
     return None
@@ -193,7 +200,7 @@ def scan():
     out = []
     for key, audio in groups.items():
         prefix = os.path.join(REX_DIR, key)
-        info = parse_name(key) or {"when": "", "source": "其它", "origin": "", "title": key}
+        info = parse_name(key) or {"when": "", "source": L("其它", "Other"), "origin": "", "title": key}
         audio.sort(key=lambda p: ("-sys" in p, p))           # 分轨的那对：麦克风那条在前
         txt = prefix + ".txt"
         has_txt = os.path.exists(txt) and os.path.getsize(txt) > 0
@@ -239,7 +246,7 @@ def detail(key):
     if os.path.exists(prefix + ".分析.md"):
         with open(prefix + ".分析.md", encoding="utf-8") as fh:
             analysis = fh.read()
-    info = parse_name(key) or {"when": "", "source": "其它", "origin": "", "title": key}
+    info = parse_name(key) or {"when": "", "source": L("其它", "Other"), "origin": "", "title": key}
     return dict(info, key=key, entries=rows, proof=state, analysis=analysis,
                 chat=load_chat(prefix).get("turns", []), audio=[os.path.basename(p) for p in audio_files(key)],
                 busy=JOBS.busy(key), has_session=bool(session_of(prefix)))
@@ -282,19 +289,25 @@ def trash_recording(key):
     """录音台里双击一条：整条录音移到废纸篓。正在录的、正在处理的不动。返回 (成没成, 说明)。"""
     files = recording_files(key)
     if not files:
-        return False, "这条没有文件了（刷新一下）"
+        return False, L("这条没有文件了（刷新一下）", "This recording has no files left (refresh)")
     now = recording_now()
     if now.get("on") and set(now.get("files", [])) & {os.path.basename(f) for f in files}:
-        return False, "这条正在录，先停下再删"
+        return False, L("这条正在录，先停下再删", "This one is still recording. Stop it before deleting")
     if JOBS.busy(key):
-        return False, "这条正在处理，等它跑完再删"
+        return False, L("这条正在处理，等它跑完再删", "This one is being processed. Wait for it to finish, then delete")
     for f in files:
         to_trash(f)
     left = [f for f in files if os.path.exists(f)]
     if left:
-        return False, "有 %d 个文件没移走：%s" % (len(left), "、".join(os.path.basename(x) for x in left[:3]))
-    log("移到废纸篓：%s（%d 个文件）" % (key, len(files)))
-    return True, "移到废纸篓了（%d 个文件）。删错了：访达 → 废纸篓 → 右键「放回原处」" % len(files)
+        return False, L("有 %d 个文件没移走：%s" % (len(left), "、".join(os.path.basename(x) for x in left[:3])),
+                        "%s couldn't be moved: %s" % (files_en(len(left)), ", ".join(os.path.basename(x) for x in left[:3])))
+    log(L("移到废纸篓：%s（%d 个文件）" % (key, len(files)), "Moved to the Trash: %s (%s)" % (key, files_en(len(files)))))
+    return True, L("移到废纸篓了（%d 个文件）。删错了：访达 → 废纸篓 → 右键「放回原处」" % len(files),
+                   "Moved to the Trash (%s). To undo: Finder → Trash → right-click → Put Back" % files_en(len(files)))
+
+
+def files_en(n):
+    return "%d file%s" % (n, "" if n == 1 else "s")
 
 
 # ---------------------------------------------------------------- 接着问（分析那个会话）
@@ -337,10 +350,11 @@ def chat(key, question):
     prefix = os.path.join(REX_DIR, key)
     sid = session_of(prefix)
     if not sid:
-        return {"ok": False, "msg": "这条还没有分析，先处理它（rex go）再来问"}
+        return {"ok": False, "msg": L("这条还没有分析，先处理它（rex go）再来问",
+                                      "No analysis yet. Process it first (rex go), then ask")}
     lock = _chat_locks.setdefault(key, threading.Lock())
     if not lock.acquire(blocking=False):
-        return {"ok": False, "msg": "上一个问题还在等回答"}
+        return {"ok": False, "msg": L("上一个问题还在等回答", "Still waiting for the answer to the previous question")}
     try:
         # 会话存在 REX_DIR 下（analyze.py 的 --cwd），resume 要在那儿跑；ANTHROPIC_* 由 claude_cli 清掉
         obj = claude_cli.run(["--resume", sid, "--tools", "", "--disable-slash-commands", question], "",
@@ -348,7 +362,7 @@ def chat(key, question):
     except claude_cli.AccountError as e:
         return {"ok": False, "msg": e.args[0]}
     except RuntimeError as e:
-        return {"ok": False, "msg": "没问成：%s" % e}
+        return {"ok": False, "msg": L("没问成：%s", "Couldn't ask: %s") % e}
     finally:
         lock.release()
     answer = (obj.get("result") or "").strip()
@@ -372,6 +386,8 @@ class Jobs:
         self.lock = threading.Lock()
         threading.Thread(target=self._worker, daemon=True).start()
 
+    # state 只有「排队 / 进行中 / 完成 / 出错」这四个固定值，不跟界面语言走：这里和 app.js 都拿它比较，
+    # app.js 显示时再翻成英文。label 只给人看，跟着语言走
     def add(self, kind, key, label, steps):
         """steps：要依次跑的命令；某一步可以是函数，到时候才算出命令（比如导入完才知道文件名）。"""
         jid = uuid.uuid4().hex[:8]
@@ -428,17 +444,17 @@ class Jobs:
                         try:
                             rc = subprocess.call(cmd, stdout=fh, stderr=subprocess.STDOUT, env=child_env(), cwd="/tmp")
                         except OSError as e:
-                            fh.write("跑不起来：%s\n" % e)
+                            fh.write(L("跑不起来：%s\n", "Couldn't run: %s\n") % e)
                             rc = 127
                         if rc:
                             break
             except Exception as e:  # noqa: BLE001  这是唯一的后台线程：磁盘满、目录不可写时它一死，队列就永远卡住
-                log("任务 %s 出错：%r" % (job["label"], e))
+                log(L("任务 %s 出错：%r", "Job %s failed: %r") % (job["label"], e))
                 rc = rc or 1
             finally:
                 job["rc"], job["ended"] = rc, time.time()
                 job["state"] = "完成" if rc == 0 else "出错"
-                log("任务 %s %s：%s" % (job["label"], job["state"], rc))
+                log(L("任务 %s %s：%s", "Job %s %s: %s") % (job["label"], L(job["state"], "done" if rc == 0 else "failed"), rc))
 
 
 JOBS = Jobs()
@@ -498,7 +514,8 @@ def run_rex(*args, timeout=60):
                 break
             except subprocess.TimeoutExpired:
                 continue
-        return 124, "等了 %d 秒没回来，已叫停；现在到底在不在录，以 rex status 为准" % timeout
+        return 124, L("等了 %d 秒没回来，已叫停；现在到底在不在录，以 rex status 为准",
+                      "No answer after %d seconds, so it was stopped. Run rex status to see whether it's recording") % timeout
     out = re.sub(r"\x1b\[[0-9;]*m", "", out or "")
     return p.returncode, out.strip()
 
@@ -604,9 +621,12 @@ def phone_list():
         files = [os.path.join(VM_DIR, f) for f in os.listdir(VM_DIR)
                  if os.path.splitext(f)[1].lower() in (".m4a", ".qta", ".wav")]
     except PermissionError:
-        return {"ok": False, "msg": "读不了语音备忘录（隐私权限）。从终端跑 rex app 起服务就行——终端有这个权限"}
+        return {"ok": False, "msg": L("读不了语音备忘录（隐私权限）。从终端跑 rex app 起服务就行——终端有这个权限",
+                                      "Can't read Voice Memos (privacy permission). Start the server from a terminal "
+                                      "with rex app: the terminal has this permission")}
     except OSError:
-        return {"ok": False, "msg": "找不到语音备忘录的同步目录（iPhone 上要打开 iCloud → 语音备忘录）"}
+        return {"ok": False, "msg": L("找不到语音备忘录的同步目录（iPhone 上要打开 iCloud → 语音备忘录）",
+                                      "Can't find the Voice Memos sync folder (on the iPhone, turn on iCloud → Voice Memos)")}
     titles = {}
     db = os.path.join(VM_DIR, "CloudRecordings.db")
     try:
@@ -661,7 +681,7 @@ def search(q):
         prefix = os.path.join(REX_DIR, key)
         hits = []
         if low in key.lower():
-            hits.append({"t": None, "text": "（文件名）"})
+            hits.append({"t": None, "text": L("（文件名）", "(file name)")})
         if os.path.exists(prefix + ".srt"):
             ents = proofread.read_entries(prefix)
             lab = proofread.has_labels(ents)
@@ -718,6 +738,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = os.path.join(STATIC, name)
         with open(path, "rb") as fh:
             body = fh.read()
+        if EN and name == "index.html":
+            # 页面语言在这里定：app.js 按 <html lang> 挑中英文，文件本身不动。<title>录音台</title> 也不能动——
+            # rex.sh 的 app_up 靠这个确切的字符串认出端口上是录音台；英文的标题由 app.js 设 document.title
+            body = body.replace(b'<html lang="zh-CN">', b'<html lang="en">', 1)
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -771,7 +795,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # ---- GET
     def do_GET(self):
         if not self.allowed_host():
-            return self.deny("只接受 127.0.0.1")
+            return self.deny(L("只接受 127.0.0.1", "Only 127.0.0.1 is accepted"))
         u = urllib.parse.urlparse(self.path)
         qs = urllib.parse.parse_qs(u.query)
         q1 = lambda k, d="": (qs.get(k) or [d])[0]  # noqa: E731
@@ -784,7 +808,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
         if not self.authed():
-            return self.deny("口令不对：从 http://127.0.0.1:%d/ 重新打开" % PORT)
+            return self.deny(L("口令不对：从 http://127.0.0.1:%d/ 重新打开", "Wrong token: reopen http://127.0.0.1:%d/") % PORT)
         try:
             if u.path == "/api/state":
                 return self.send_json({"ok": True, "recordings": scan(), "jobs": JOBS.view(),
@@ -792,7 +816,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                        "watcher": watcher_installed(), "rex_dir": REX_DIR})
             if u.path == "/api/rex":
                 d = detail(q1("k"))
-                return self.send_json({"ok": True, "rex": d} if d else {"ok": False, "msg": "找不到这条录音"})
+                return self.send_json({"ok": True, "rex": d} if d else
+                                      {"ok": False, "msg": L("找不到这条录音", "Recording not found")})
             if u.path == "/api/login":
                 return self.send_json({"ok": True, "login": login_state()})
             if u.path == "/api/search":
@@ -803,22 +828,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 files = audio_files(q1("k"))
                 i = int(q1("i", "0") or 0)
                 if "/" in q1("k") or not files or i >= len(files):
-                    return self.send_json({"ok": False, "msg": "没有音频"}, 404)
+                    return self.send_json({"ok": False, "msg": L("没有音频", "No audio")}, 404)
                 return self.send_media(files[i])
         except Exception as e:  # noqa: BLE001  页面上看得到比服务挂掉好
-            log("出错 %s：%r" % (u.path, e))
-            return self.send_json({"ok": False, "msg": "服务出错：%s" % e}, 500)
-        self.send_json({"ok": False, "msg": "没有这个地址"}, 404)
+            log(L("出错 %s：%r", "Error %s: %r") % (u.path, e))
+            return self.send_json({"ok": False, "msg": L("服务出错：%s", "Server error: %s") % e}, 500)
+        self.send_json({"ok": False, "msg": L("没有这个地址", "No such address")}, 404)
 
     # ---- POST
     def do_POST(self):
         if not self.allowed_host():
-            return self.deny("只接受 127.0.0.1")
+            return self.deny(L("只接受 127.0.0.1", "Only 127.0.0.1 is accepted"))
         if not self.authed() or self.headers.get("X-Rex-App") != "1":
-            return self.deny("口令不对：从 http://127.0.0.1:%d/ 重新打开" % PORT)
+            return self.deny(L("口令不对：从 http://127.0.0.1:%d/ 重新打开", "Wrong token: reopen http://127.0.0.1:%d/") % PORT)
         origin = self.headers.get("Origin")
         if origin and origin not in ("http://127.0.0.1:%d" % PORT, "http://localhost:%d" % PORT):
-            return self.deny("不接受别的网页发来的请求")
+            return self.deny(L("不接受别的网页发来的请求", "Requests from other web pages are not accepted"))
         u = urllib.parse.urlparse(self.path)
         length = int(self.headers.get("Content-Length") or 0)
         try:
@@ -830,48 +855,56 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     mtime = None
                 dest = save_upload(name, length, self.rfile, mtime)
                 if not dest:
-                    return self.send_json({"ok": False, "msg": "没传上：不是音视频文件、太大，或者没传完"}, 400)
+                    return self.send_json({"ok": False, "msg": L("没传上：不是音视频文件、太大，或者没传完",
+                                                                 "Upload failed: not an audio or video file, too large, "
+                                                                 "or incomplete")}, 400)
                 if not watcher_installed():      # 没装收件箱监视，就自己排一个
-                    JOBS.add("inbox", "", "处理收件箱", [rex_cmd("go", "--inbox")])
-                return self.send_json({"ok": True, "msg": "放进收件箱了：%s" % os.path.basename(dest)})
+                    JOBS.add("inbox", "", L("处理收件箱", "Process the inbox"), [rex_cmd("go", "--inbox")])
+                return self.send_json({"ok": True, "msg": L("放进收件箱了：%s", "Added to the inbox: %s") % os.path.basename(dest)})
             data = json.loads(self.rfile.read(length) or b"{}") if length else {}
             key = data.get("key", "")
             if key and "/" in key:
-                return self.send_json({"ok": False, "msg": "名字不对"}, 400)
+                return self.send_json({"ok": False, "msg": L("名字不对", "Invalid name")}, 400)
             if u.path == "/api/decide":
                 if JOBS.busy(key):
-                    return self.send_json({"ok": False, "msg": "这条正在处理，等它跑完再改"})
+                    return self.send_json({"ok": False, "msg": L("这条正在处理，等它跑完再改",
+                                                                 "This one is being processed. Wait for it to finish, "
+                                                                 "then edit")})
                 ok, msg = proofread.decide(os.path.join(REX_DIR, key), int(data.get("rid", 0)), data.get("action", ""))
                 return self.send_json({"ok": ok, "msg": msg})
             if u.path == "/api/trash":
                 if not key:
-                    return self.send_json({"ok": False, "msg": "没说删哪一条"}, 400)
+                    return self.send_json({"ok": False, "msg": L("没说删哪一条", "No recording given")}, 400)
                 ok, msg = trash_recording(key)
                 return self.send_json({"ok": ok, "msg": msg})
             if u.path == "/api/go":
                 files = audio_files(key)
                 if not files:
-                    return self.send_json({"ok": False, "msg": "这条没有音频文件"})
+                    return self.send_json({"ok": False, "msg": L("这条没有音频文件", "This recording has no audio file")})
                 if JOBS.busy(key):
-                    return self.send_json({"ok": False, "msg": "已经在处理了（录音台排的，或者收件箱 / 终端那边正在跑）"})
-                JOBS.add("go", key, "处理：%s" % (parse_name(key) or {"title": key})["title"], [rex_cmd("go", files[0])])
-                return self.send_json({"ok": True, "msg": "排上了"})
+                    return self.send_json({"ok": False, "msg": L("已经在处理了（录音台排的，或者收件箱 / 终端那边正在跑）",
+                                                                 "Already being processed (queued here, or running from "
+                                                                 "the inbox / a terminal)")})
+                JOBS.add("go", key, L("处理：%s", "Process: %s") % (parse_name(key) or {"title": key})["title"],
+                         [rex_cmd("go", files[0])])
+                return self.send_json({"ok": True, "msg": L("排上了", "Queued")})
             if u.path == "/api/chat":
                 q = (data.get("q") or "").strip()
                 if not q:
-                    return self.send_json({"ok": False, "msg": "问点什么"})
+                    return self.send_json({"ok": False, "msg": L("问点什么", "Ask something")})
                 return self.send_json(chat(key, q))
             if u.path == "/api/record":
                 mode = data.get("mode", "")
                 if mode not in ("sys", "both", "mic"):
-                    return self.send_json({"ok": False, "msg": "不认识的模式"})
+                    return self.send_json({"ok": False, "msg": L("不认识的模式", "Unknown mode")})
                 # 连点两下就是两次开录（2026-10-13：两秒内开了两次，第一个成了孤儿录了 53 分钟）。
                 # rex.sh 自己也加了锁，这里再挡一道，第二下直接回话
                 if not _record_lock.acquire(blocking=False):
-                    return self.send_json({"ok": False, "msg": "正在开始录音，别连点"})
+                    return self.send_json({"ok": False, "msg": L("正在开始录音，别连点",
+                                                                 "Already starting a recording; don't click twice")})
                 try:
                     if recording_now().get("on"):
-                        return self.send_json({"ok": False, "msg": "已经在录了，先停掉再开"})
+                        return self.send_json({"ok": False, "msg": L("已经在录了，先停掉再开", "Already recording. Stop it first")})
                     # 第一次录音会弹麦克风授权框，rex.sh 等用户点（最多两分钟），所以这里也得等
                     rc, out = run_rex(mode, timeout=150)
                 finally:
@@ -883,30 +916,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if u.path == "/api/phone/import":
                 path = data.get("path", "")
                 if not path.startswith(VM_DIR + "/") or not os.path.exists(path):
-                    return self.send_json({"ok": False, "msg": "找不到这条语音备忘录"})
+                    return self.send_json({"ok": False, "msg": L("找不到这条语音备忘录", "Voice memo not found")})
                 stamp = data.get("stamp", "")
 
                 def go_step():
                     hit = sorted(f for f in os.listdir(REX_DIR) if f.startswith(stamp + "_phone")
                                  and os.path.splitext(f)[1].lower() in AUDIO_EXT)
                     return rex_cmd("go", os.path.join(REX_DIR, hit[0])) if hit else None
-                JOBS.add("phone", stamp + "_phone", "手机录音 %s" % stamp, [rex_cmd("phone", path), go_step])
-                return self.send_json({"ok": True, "msg": "排上了：先取出来转写，再校对和分析"})
+                JOBS.add("phone", stamp + "_phone", L("手机录音 %s", "Phone recording %s") % stamp,
+                         [rex_cmd("phone", path), go_step])
+                return self.send_json({"ok": True, "msg": L("排上了：先取出来转写，再校对和分析",
+                                                            "Queued: import and transcribe it, then proofread and "
+                                                            "analyze")})
             if u.path == "/api/reveal":
                 files = audio_files(key) or [os.path.join(REX_DIR, key + ".txt")]
                 subprocess.run(["open", "-R", files[0]])
                 return self.send_json({"ok": True})
         except Exception as e:  # noqa: BLE001
-            log("出错 %s：%r" % (u.path, e))
-            return self.send_json({"ok": False, "msg": "服务出错：%s" % e}, 500)
-        self.send_json({"ok": False, "msg": "没有这个地址"}, 404)
+            log(L("出错 %s：%r", "Error %s: %r") % (u.path, e))
+            return self.send_json({"ok": False, "msg": L("服务出错：%s", "Server error: %s") % e}, 500)
+        self.send_json({"ok": False, "msg": L("没有这个地址", "No such address")}, 404)
 
 
 def main():
     os.makedirs(CACHE, exist_ok=True)
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     srv.daemon_threads = True
-    log("录音台：http://127.0.0.1:%d/   录音在 %s" % (PORT, REX_DIR))
+    log(L("录音台：http://127.0.0.1:%d/   录音在 %s", "Recording Desk: http://127.0.0.1:%d/   recordings in %s") % (PORT, REX_DIR))
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

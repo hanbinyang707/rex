@@ -126,6 +126,8 @@ audio { width: 100%; height: 36px; }
 .sum .big { font-size: 22px; font-weight: 700; margin-right: 2px; }
 .h3 { font-size: 15px; font-weight: 700; margin: 22px 0 8px; display: flex; align-items: baseline; gap: 10px; }
 .h3 small { font-weight: 400; color: var(--muted); font-size: 12px; }
+/* 英文的说明和按键提示比中文长：放不下就整块折到下一行，别把「To confirm」这种标题挤成两行。只管英文页面 */
+html[lang="en"] .h3 { flex-wrap: wrap; row-gap: 2px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; margin-bottom: 8px; display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; align-items: center; }
 .card.focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .card .ch { font-size: 15px; }
@@ -178,30 +180,31 @@ audio { width: 100%; height: 36px; }
 </head>
 <body>
 <header>
-  <h1>录音台</h1>
+  <h1 data-en="Recording Desk">录音台</h1>
   <div class="recbar" id="recbar">
-    <button class="recbtn main" data-mode="both" title="线上通话、开会：你的麦克风 + 电脑放出来的声音，两边各存一条轨">我 + 对方</button>
-    <button class="recbtn" data-mode="sys" title="只录电脑放出来的声音（网课、视频）。不录你的麦克风">只录电脑声音</button>
-    <button class="recbtn" data-mode="mic" title="只录麦克风（当面聊）。不录电脑放的声音">只录我</button>
+    <button class="recbtn main" data-mode="both" title="线上通话、开会：你的麦克风 + 电脑放出来的声音，两边各存一条轨" data-en="Me + other side" data-en-title="Online calls and meetings: your microphone + the computer's audio, each saved on its own track">我 + 对方</button>
+    <button class="recbtn" data-mode="sys" title="只录电脑放出来的声音（网课、视频）。不录你的麦克风" data-en="Computer audio only" data-en-title="Records only the computer's audio (online classes, videos). Not your microphone">只录电脑声音</button>
+    <button class="recbtn" data-mode="mic" title="只录麦克风（当面聊）。不录电脑放的声音" data-en="Only me" data-en-title="Records only the microphone (in-person conversations). Not the computer's audio">只录我</button>
     <span class="recnow"><span class="dot"></span><span id="recclock">00:00</span><span id="recmode"></span>
-      <span id="meters"></span><button id="stop">停止</button></span>
+      <span id="meters"></span><button id="stop" data-en="Stop">停止</button></span>
   </div>
-  <input class="search" id="search" type="search" placeholder="搜索所有稿子…">
+  <input class="search" id="search" type="search" placeholder="搜索所有稿子…" data-en-placeholder="Search all transcripts…">
   <span class="login" id="login">Claude …</span>
 </header>
 <main>
   <aside>
-    <div class="drop"><b>把音频文件拖进窗口</b>，就放进收件箱自动处理<br>转写 → 分人 → Claude 校对 → 分析</div>
+    <!-- 带格式的那几句拆成几个 span，各自有 data-en：app.js 只换 textContent，换整段会把 <b> <br> 冲掉 -->
+    <div class="drop"><b data-en="Drag audio files into the window">把音频文件拖进窗口</b><span data-en=" to put them in the inbox for automatic processing">，就放进收件箱自动处理</span><br><span data-en="Transcribe → speakers → Claude proofreading → analysis">转写 → 分人 → Claude 校对 → 分析</span></div>
     <div class="list" id="list"></div>
-    <details class="side-sec" id="phonebox"><summary>手机里的录音</summary><div id="phone" class="muted">…</div></details>
-    <div class="side-sec"><div class="muted" style="margin-bottom:4px">正在做的事</div><div class="jobs" id="jobs"><span class="muted">没有</span></div></div>
+    <details class="side-sec" id="phonebox"><summary data-en="Recordings on your phone">手机里的录音</summary><div id="phone" class="muted">…</div></details>
+    <div class="side-sec"><div class="muted" style="margin-bottom:4px" data-en="Jobs">正在做的事</div><div class="jobs" id="jobs"><span class="muted" data-en="None">没有</span></div></div>
   </aside>
   <section class="detail" id="detail">
-    <div class="empty">左边选一条录音。<br>
-      看稿子时点时间就从那里放；校对里待确认的，按 <kbd>Y</kbd> 采纳、<kbd>N</kbd> 不采纳、<kbd>J</kbd>/<kbd>K</kbd> 上下挪。</div>
+    <div class="empty"><span data-en="Select a recording on the left.">左边选一条录音。</span><br>
+      <span data-en="Click a timestamp in the transcript to play from there. In Proofreading, press ">看稿子时点时间就从那里放；校对里待确认的，按 </span><kbd>Y</kbd><span data-en=" to accept, "> 采纳、</span><kbd>N</kbd><span data-en=" to reject, "> 不采纳、</span><kbd>J</kbd>/<kbd>K</kbd><span data-en=" to move down/up."> 上下挪。</span></div>
   </section>
 </main>
-<div class="overlay" id="overlay"><div>松手，放进收件箱</div></div>
+<div class="overlay" id="overlay"><div data-en="Drop to put it in the inbox">松手，放进收件箱</div></div>
 <div class="toasts" id="toasts"></div>
 <script src="/app.js"></script>
 </body>

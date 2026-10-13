@@ -57,6 +57,8 @@ import time
 import urllib.error
 import urllib.request
 
+from i18n import L
+
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 AUDIO_EXT = (".m4a", ".mp3", ".aac", ".wav", ".ogg", ".opus", ".flac", ".m4b")
@@ -116,11 +118,11 @@ def looks_audio(url):
 def resolve(url):
     """返回 (音频地址, 元信息 dict, 走了哪一道)。找不到给 (None, {}, 试过的清单)。"""
     if looks_audio(url):
-        return url, {}, "链接本身就是音频文件"
+        return url, {}, L("链接本身就是音频文件", "the link itself is an audio file")
 
     raw, ctype = fetch(url)
     if ctype.split(";")[0].strip().startswith("audio/"):
-        return url, {}, "链接本身就是音频（按 Content-Type 判）"
+        return url, {}, L("链接本身就是音频（按 Content-Type 判）", "the link itself is audio (by Content-Type)")
     html = raw.decode("utf-8", "replace")
 
     info = {}
@@ -149,11 +151,12 @@ def resolve(url):
             info.setdefault("title", meta(html, "og:title"))
             return cand, info, label
 
-    tried.append("全页正则捞音频链接")
+    tried.append(L("全页正则捞音频链接", "a regex search of the whole page for audio links"))
     m = AUDIO_RE.search(html)
     if m:
         info.setdefault("title", meta(html, "og:title"))
-        return m.group(0), info, "全页正则（兜底，不一定是正片）"
+        return m.group(0), info, L("全页正则（兜底，不一定是正片）",
+                                   "whole-page regex (fallback; may not be the episode itself)")
 
     return None, info, tried
 
@@ -233,7 +236,7 @@ def download(url, dst, referer, tries=5):
                         now = time.time()
                         if tty and now - last > 0.2:
                             last = now
-                            sys.stdout.write("\r  下载 %s%s" % (
+                            sys.stdout.write(L("\r  下载 %s%s", "\r  Downloading %s%s") % (
                                 human(got),
                                 " / %s  %4.1f%%" % (human(total), 100.0 * got / total)
                                 if total else ""))
@@ -243,7 +246,8 @@ def download(url, dst, referer, tries=5):
                 raise
             if tty:
                 sys.stdout.write("\r" + " " * 46 + "\r")
-            print("  连接断了（%s），从 %s 处续传…" % (e, human(got)))
+            print(L("  连接断了（%s），从 %s 处续传…", "  Connection dropped (%s); resuming from %s…")
+                  % (e, human(got)))
             time.sleep(1.5 * (attempt + 1))
             continue
 
@@ -252,14 +256,15 @@ def download(url, dst, referer, tries=5):
         if attempt < tries - 1:
             if tty:
                 sys.stdout.write("\r" + " " * 46 + "\r")
-            print("  只下到 %s / %s，续传…" % (human(got), human(total)))
+            print(L("  只下到 %s / %s，续传…", "  Only got %s / %s; resuming…") % (human(got), human(total)))
             time.sleep(1.0)
 
     if tty:
         sys.stdout.write("\r" + " " * 46 + "\r")
     if total and got != total:
         os.remove(tmp)
-        raise OSError("下不全：%s / %s，重试 %d 次仍然差字节，已删掉半截文件"
+        raise OSError(L("下不全：%s / %s，重试 %d 次仍然差字节，已删掉半截文件",
+                        "incomplete: %s / %s, still missing bytes after %d tries; the partial file was deleted")
                       % (human(got), human(total), tries))
     # 下全了才改名：中途断掉时留下的是 .part，不会被当成一个完好的录音
     os.replace(tmp, dst)
@@ -267,23 +272,25 @@ def download(url, dst, referer, tries=5):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="下载播客单集音频")
+    ap = argparse.ArgumentParser(description=L("下载播客单集音频", "Download the audio of a podcast episode"))
     ap.add_argument("url")
     ap.add_argument("--dir", default=os.path.expanduser("~/Recordings"))
-    ap.add_argument("--print-only", action="store_true", help="只打印音频地址，不下载")
+    ap.add_argument("--print-only", action="store_true",
+                    help=L("只打印音频地址，不下载", "only print the audio URL; don't download"))
     a = ap.parse_args()
 
     try:
         audio, info, how = resolve(a.url)
     except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
-        print("打不开这个链接：%s" % e)
+        print(L("打不开这个链接：%s", "Can't open this link: %s") % e)
         return 1
 
     if not audio:
-        print("这个页面里找不到音频地址。试过：")
+        print(L("这个页面里找不到音频地址。试过：", "No audio URL found on this page. Tried:"))
         for t in (how if isinstance(how, list) else [str(how)]):
             print("  · %s" % t)
-        print("\n付费/会员内容通常就是这样——页面里本来就没有公开的音频地址。")
+        print(L("\n付费/会员内容通常就是这样——页面里本来就没有公开的音频地址。",
+                "\nPaid or members-only content usually looks like this: the page has no public audio URL."))
         return 1
 
     if a.print_only:
@@ -292,12 +299,12 @@ def main():
 
     title = info.get("title") or ""
     pod = info.get("podcast") or ""
-    print("  来源：%s" % how)
+    print(L("  来源：%s", "  Source: %s") % how)
     if pod or title:
-        print("  节目：%s%s" % (pod + " · " if pod else "", title))
+        print(L("  节目：%s%s", "  Episode: %s%s") % (pod + " · " if pod else "", title))
     if info.get("seconds"):
         s = int(info["seconds"])
-        print("  时长：%d 分 %02d 秒" % (s // 60, s % 60))
+        print(L("  时长：%d 分 %02d 秒", "  Duration: %d min %02d s") % (s // 60, s % 60))
 
     ext = os.path.splitext(audio.split("?")[0])[1].lower() or ".m4a"
     name = "_".join(x for x in (stamp(info.get("date")), "web",
@@ -305,15 +312,15 @@ def main():
     os.makedirs(a.dir, exist_ok=True)
     dst = os.path.join(a.dir, name + ext)
     if os.path.exists(dst):
-        print("  已经下过了：%s" % dst)
+        print(L("  已经下过了：%s", "  Already downloaded: %s") % dst)
         print("PATH %s" % dst)
         return 0
 
-    print("  音频：%s" % audio)
+    print(L("  音频：%s", "  Audio: %s") % audio)
     try:
         n = download(audio, dst, a.url)
     except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
-        print("  下载失败：%s" % e)
+        print(L("  下载失败：%s", "  Download failed: %s") % e)
         for junk in (dst + ".part",):
             if os.path.exists(junk):
                 os.remove(junk)

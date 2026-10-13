@@ -10,6 +10,7 @@ import unittest
 
 # 测试不碰真的家目录：锁文件、缓存、~/.config/rex 里的个人词表都按 HOME 找
 os.environ["HOME"] = tempfile.mkdtemp()
+os.environ["REX_LANG"] = "zh"            # 断言的是中文提示；英文另有 test_i18n.py
 REXDIR = tempfile.mkdtemp()
 os.environ["REX_DIR"] = REXDIR           # rex_app 在 import 时读它，必须先设
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))

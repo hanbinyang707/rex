@@ -43,7 +43,8 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import claude_cli  # noqa: E402
-import proofread  # noqa: E402  load_state / read_entries / stamp
+import proofread  # noqa: E402  load_state / read_entries / stamp / spans
+from i18n import L  # noqa: E402
 
 CUSTOM = os.path.expanduser("~/.config/rex/analysis-prompt.md")
 TIMEOUT = 900
@@ -53,13 +54,21 @@ TIMEOUT = 900
 # 任务，回了一句「我先找到稿子文件，逐条核对这 112 条建议、确认的直接改进稿子里」就结束了（工具是关的，
 # 它什么也做不了），3.1 万个输出 token 全花在打算上。所以：要求放系统提示；材料用标签包起来、只给数据
 # 不给带指令语气的话；任务那句放在用户消息最后
-PREAMBLE = """你在帮用户整理一段录音。用户消息里有两块材料：<转写稿> 是 whisper 转写、已经校对过的稿子；\
+PREAMBLE = L("""你在帮用户整理一段录音。用户消息里有两块材料：<转写稿> 是 whisper 转写、已经校对过的稿子；\
 <可能听错的地方> 是校对时没把握、没有改的位置，只是提醒你这些地方可能有识别错误。\
 你的任务只有一个：按下面的要求写一份分析。不要核对或修改稿子，不要说你打算做什么，直接写。
 
-"""
+""",
+             # 英文版：标签名和 main() 里英文的那几个标签对得上
+             """You are helping the user make sense of a recording. The user message contains two pieces of \
+material: <transcript> is the transcript, transcribed by whisper and already proofread; <possible_mishearings> lists \
+places the proofreading wasn't sure about and left unchanged, only to warn you that these spots may contain \
+recognition errors. You have exactly one task: write an analysis as described below. Don't check or edit the \
+transcript, and don't say what you plan to do; just write it.
 
-DEFAULT = """下面是一段录音的转写稿（whisper 转写，已经让 Claude 校对过识别错误）。\
+""")
+
+DEFAULT = L("""下面是一段录音的转写稿（whisper 转写，已经让 Claude 校对过识别错误）。\
 「[时间] 名字：」开头的是对话稿，名字是按声纹或分轨推测的，可能有错。请用中文写一份分析：
 
 1. 一段话说清楚这是一次什么样的谈话、谁在和谁说、大概说了什么。
@@ -69,7 +78,23 @@ DEFAULT = """下面是一段录音的转写稿（whisper 转写，已经让 Clau
 5. 如果有决定、计划、待办、约定，单独列出来；没有就写「没有」。
 
 要求：只依据稿子，不要编造稿子里没有的内容；转写可能有错，碰到读不通或拿不准的地方直接说明，\
-不要硬解释。"""
+不要硬解释。""",
+            # 英文版。原话一条多说了「用稿子原来的语言」：分析用英文写，原话不能跟着翻译，翻了就不是原话
+            """Below is the transcript of a recording (transcribed by whisper; Claude has already proofread it \
+for recognition errors). Lines that start with "[time] name：" are a dialogue transcript; the names were guessed from \
+voiceprints or separate tracks and may be wrong. Please write an analysis in English:
+
+1. One paragraph saying what kind of conversation this is, who is talking to whom, and roughly what was said.
+2. Main topics, in the order they come up: the key points of each, with the approximate time (use the \
+transcript's timestamps).
+3. Quotes worth keeping: copy them word for word, in the transcript's own language, with the time and speaker; \
+don't rephrase them.
+4. Things that were mentioned but not developed, worth following up on or thinking about later.
+5. Any decisions, plans, to-dos or agreements, listed separately; if there are none, write "None".
+
+Rules: base everything on the transcript only, and don't make up anything that isn't in it. The transcript may \
+contain errors: where something doesn't make sense or you're not sure, say so plainly instead of forcing an \
+interpretation.""")
 
 
 def unsure_list(prefix):
@@ -77,7 +102,8 @@ def unsure_list(prefix):
     entries = proofread.read_entries(prefix)
     state = proofread.load_state(prefix, entries) if entries else None
     rows = (state or {}).get("unsure") or []
-    return ["- %s %s：「%s」可能是「%s」" % (proofread.stamp(r["t"]), r.get("who") or "", r["old"], r["new"])
+    return [L("- %s %s：「%s」可能是「%s」", "- %s %s: “%s” might be “%s”")
+            % (proofread.stamp(r["t"]), r.get("who") or "", r["old"], r["new"])
             for r in rows]
 
 
@@ -87,7 +113,7 @@ def failed_lines(prefix):
         state = json.load(open(prefix + ".校对.json", encoding="utf-8"))
     except (OSError, ValueError):
         return ""
-    return "、".join("%d~%d" % (a, b) for a, b in (state.get("failed") or []))
+    return proofread.spans(state.get("failed") or [])
 
 
 def log(msg):
@@ -95,28 +121,35 @@ def log(msg):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="用 Claude 分析转写稿")
+    ap = argparse.ArgumentParser(description=L("用 Claude 分析转写稿", "Analyze a transcript with Claude"))
     ap.add_argument("prefix")
     ap.add_argument("--cwd", default=os.path.expanduser("~/Recordings"),
-                    help="会话存在哪个目录下（claude --resume 要在这个目录里跑）")
+                    help=L("会话存在哪个目录下（claude --resume 要在这个目录里跑）",
+                           "Directory the session is stored under (claude --resume has to run there)"))
     a = ap.parse_args()
     txt = a.prefix + ".txt"
     if not os.path.exists(txt) or not open(txt, encoding="utf-8").read().strip():
-        log("  没有可分析的稿子：%s" % txt)
+        log(L("  没有可分析的稿子：%s", "  No transcript to analyze: %s") % txt)
         return 2
     prompt = DEFAULT
     if os.path.exists(CUSTOM):
         prompt = open(CUSTOM, encoding="utf-8").read().strip() or DEFAULT
 
     text = open(txt, encoding="utf-8").read()
-    msg = "<转写稿 name=\"%s\">\n%s\n</转写稿>\n" % (os.path.basename(a.prefix), text.strip())
+    # 标签名跟着 PREAMBLE 的语言走
+    msg = L("<转写稿 name=\"%s\">\n%s\n</转写稿>\n",
+            "<transcript name=\"%s\">\n%s\n</transcript>\n") % (os.path.basename(a.prefix), text.strip())
     hints = unsure_list(a.prefix)
     if hints:
-        msg += "\n<可能听错的地方>\n%s\n</可能听错的地方>\n" % "\n".join(hints)
+        msg += L("\n<可能听错的地方>\n%s\n</可能听错的地方>\n",
+                 "\n<possible_mishearings>\n%s\n</possible_mishearings>\n") % "\n".join(hints)
     unproofed = failed_lines(a.prefix)
     if unproofed:
-        msg += "\n<没校对的部分>稿子第 %s 行校对没成功，那几段还是 whisper 原稿，识别错误可能更多。</没校对的部分>\n" % unproofed
-    msg += "\n请按系统提示的要求，直接写这段录音的分析。"
+        msg += L("\n<没校对的部分>稿子第 %s 行校对没成功，那几段还是 whisper 原稿，识别错误可能更多。</没校对的部分>\n",
+                 "\n<unproofread>Proofreading failed for lines %s of the transcript; those parts are still the raw "
+                 "whisper transcript and may have more recognition errors.</unproofread>\n") % unproofed
+    msg += L("\n请按系统提示的要求，直接写这段录音的分析。",
+             "\nWrite the analysis of this recording now, as the system prompt asks.")
 
     sid = str(uuid.uuid4())
     # 整条消息走命令行参数、不走标准输入：参数和标准输入谁先谁后由命令行决定，任务那句必须在最后
@@ -124,50 +157,60 @@ def main():
             "--system-prompt", PREAMBLE + prompt]
     if os.environ.get("REX_CLAUDE_MODEL"):
         args += ["--model", os.environ["REX_CLAUDE_MODEL"]]
-    log("  Claude 分析中…（一次写完，长录音要几分钟）")
+    log(L("  Claude 分析中…（一次写完，长录音要几分钟）",
+          "  Claude is analyzing… (written in one go; long recordings take a few minutes)"))
     os.makedirs(a.cwd, exist_ok=True)
     try:
         obj = claude_cli.run(args + [msg], "", TIMEOUT, cwd=a.cwd)
     except claude_cli.AccountError as e:
-        log("  Claude 用不了：%s" % e.args[0])
+        log(L("  Claude 用不了：%s", "  Claude is unavailable: %s") % e.args[0])
         print("ACCOUNT %s" % e.args[0])
         return 3
     except (RuntimeError, OSError, ValueError) as e:   # 找不到 claude、参数太长（E2BIG）、输出解析不了
-        log("  分析失败：%s" % e)
+        log(L("  分析失败：%s", "  Analysis failed: %s") % e)
         return 4
     res = (obj.get("result") or "").strip()
     # 短得不像一份分析就不写报告：第一次真跑就回了一句「我先……然后……」，写进 .分析.md，rex go 下次
     # 认「有报告 = 分析过了」就再也不分析了
     if len(res) < min(400, len(text) // 4) or res.count("\n") < 3:
-        log("  分析结果不像一份分析（%d 字）：%s" % (len(res), res[:80].replace("\n", " ")))
-        log("  没写报告；再跑一次 rex go 会重新分析")
+        log(L("  分析结果不像一份分析（%d 字）：%s", "  The reply doesn't look like an analysis (length %d): %s")
+            % (len(res), res[:80].replace("\n", " ")))
+        log(L("  没写报告；再跑一次 rex go 会重新分析", "  No report written; running rex go again will redo the analysis"))
         return 4
     sid = obj.get("session_id") or sid
 
     used = claude_cli.usage_note()
     audio = next((a.prefix + e for e in (".m4a", ".wav", ".qta") if os.path.exists(a.prefix + e)),
                  a.prefix + ".txt")
-    head = ["# 分析：%s" % os.path.basename(a.prefix), "",
-            "- Claude 分析（%s），%s。稿子：`%s`" % (claude_cli.models(),
-                                               datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                                               os.path.basename(txt))]
+    head = [L("# 分析：%s", "# Analysis: %s") % os.path.basename(a.prefix), "",
+            L("- Claude 分析（%s），%s。稿子：`%s`", "- Analyzed by Claude (%s), %s. Transcript: `%s`")
+            % (claude_cli.models(), datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), os.path.basename(txt))]
     if used:
-        head.append("- 用量：%s（Max 订阅不按这个价收钱，只是衡量用了多少额度）" % used)
+        # 录音台按这一行开头（「- 用量：」，英文「- Usage: 」）把用量单独摆出来
+        head.append(L("- 用量：%s（Max 订阅不按这个价收钱，只是衡量用了多少额度）",
+                      "- Usage: %s (a Max subscription isn't charged this price; it only measures how much quota "
+                      "was used)") % used)
     if unproofed:
-        head.append("- **注意**：第 %s 行校对没成功，那几段是 whisper 原稿；补校完（再跑一次 rex go）后这份分析不会自动重做，"
-                    "要重做就删掉这个文件再 rex go" % unproofed)
+        head.append(L("- **注意**：第 %s 行校对没成功，那几段是 whisper 原稿；补校完（再跑一次 rex go）后这份分析不会自动重做，"
+                      "要重做就删掉这个文件再 rex go",
+                      "- **Note**: proofreading failed for lines %s, so those parts are the raw whisper transcript. "
+                      "Proofreading them later (run rex go again) won't redo this analysis; to redo it, delete this "
+                      "file and run rex go") % unproofed)
     # 给 rex chat，不给能直接复制运行的 claude --resume：终端里的 claude 可能指向别家接口（见 claude_cli.py），
     # 带着那些设置 resume，整个会话（含全文稿子）就发到那边去了。会话号单独写，rex.sh / rex_app 按 UUID 认。
     # 路径写全：引号里的 ~ 不会展开
-    head += ["- **接着聊**（稿子和这份分析都在那个会话里）：",
+    head += [L("- **接着聊**（稿子和这份分析都在那个会话里）：",
+               "- **Ask follow-up questions** (the transcript and this analysis are both in that session):"),
              "", "  ```bash", '  rex chat "%s"' % audio, "  ```", "",
-             "  会话号 `%s`，存在 %s 下。别直接在终端里 `claude --resume`：那个 claude 可能指向别家接口，rex chat 会先清掉那些设置"
+             L("  会话号 `%s`，存在 %s 下。别直接在终端里 `claude --resume`：那个 claude 可能指向别家接口，rex chat 会先清掉那些设置",
+               "  Session ID `%s`, stored under %s. Don't run `claude --resume` directly in a terminal: that claude "
+               "may point at another provider's API; rex chat clears those settings first")
              % (sid, a.cwd.replace(os.path.expanduser("~"), "~")),
              "", "---", ""]
     proofread.atomic_write(a.prefix + ".分析.md", "\n".join(head) + res + "\n")
-    log("  分析写好了 → %s.分析.md" % os.path.basename(a.prefix))
+    log(L("  分析写好了 → %s.分析.md", "  Analysis written → %s.分析.md") % os.path.basename(a.prefix))
     if used:
-        log("  用量：%s" % used)
+        log(L("  用量：%s", "  Usage: %s") % used)
     print("SESSION %s" % sid)
     return 0
 

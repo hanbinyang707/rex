@@ -70,6 +70,8 @@ import subprocess
 import sys
 import tempfile
 
+from i18n import L
+
 MAX_PROBES = 40      # 粗网格上限。再多的话光探测就比转写还贵
 SURVEY_WIN = 30      # 粗网格的探测窗口。宽一点稳，不容易落进一段停顿里
 BISECT_WIN = 10      # 二分时改用窄窗口。宽窗口跨在语言边界上，两种语言各占一半，
@@ -224,14 +226,20 @@ def probe_map(model, wav, dur, tmp, log):
     # 平滑：置信度不够的点继承前一个已知语言。安静段、笑声、「嗯」这些地方
     # whisper 给出的语言基本是随机的，让它们自己成段只会把文件切碎。
     ks = sorted(seen)
-    log("  探测 %d 点（网格 %.0fs，二分 %d 次）" % (len(ks), step, MAX_BISECT - budget))
+    log(L("  探测 %d 点（网格 %.0fs，二分 %d 次）",
+          "  Language probing: %d points (grid %.0fs, bisection steps: %d)")
+        % (len(ks), step, MAX_BISECT - budget))
     if QUIET:
-        log("  其中 %d 点太安静（有声不到 %d%%），不认语言，跟着邻居段走"
+        log(L("  其中 %d 点太安静（有声不到 %d%%），不认语言，跟着邻居段走",
+              "  Of these, %d too quiet (under %d%% voiced): no language assigned, "
+              "they follow the neighboring segment")
             % (len(QUIET), round(MIN_VOICED * 100)))
     if REJECTED:
-        log("  白名单外的判定当作不确定处理：" + "、".join(
+        log(L("  白名单外的判定当作不确定处理：", "  Languages outside the allowlist, treated as uncertain: ")
+            + L("、", ", ").join(
             "%s×%d" % (k, v) for k, v in sorted(REJECTED.items(), key=lambda kv: -kv[1]))
-            + "（只认 %s，改 REX_LANGS 可以加）" % ",".join(sorted(ALLOWED)))
+            + L("（只认 %s，改 REX_LANGS 可以加）", " (only %s accepted; add more with REX_LANGS)")
+            % ",".join(sorted(ALLOWED)))
     known = [seen[k] for k in ks if seen[k]]
     if not known:
         return []
@@ -351,10 +359,10 @@ def srt_shift(text, offset, start_index):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="按语言分段跑 whisper")
+    ap = argparse.ArgumentParser(description=L("按语言分段跑 whisper", "Run whisper, segmented by language"))
     ap.add_argument("--model", required=True)
-    ap.add_argument("--audio", required=True, help="16 kHz 单声道 wav")
-    ap.add_argument("--out", required=True, help="输出前缀，不带后缀")
+    ap.add_argument("--audio", required=True, help=L("16 kHz 单声道 wav", "16 kHz mono wav"))
+    ap.add_argument("--out", required=True, help=L("输出前缀，不带后缀", "output prefix, without extension"))
     ap.add_argument("--lang", default="auto")
     ap.add_argument("--prompt-file", default="")
     ap.add_argument("--vad-model", default="")
@@ -393,35 +401,43 @@ def main():
                 # 这时交给 whisper 自己认，它只听开头 30 秒——多半又是底噪，又判成 en。
                 # 用 REX_LANGS 的第一个当默认语言，比让它对着底噪猜靠谱。
                 only = ORDER[0]
-                log("  探测点都太安静，认不出语言——按 REX_LANGS 的第一个（%s）转，"
-                    "不对就 --lang 指定" % only)
-            log("  语言：%s（整段一致）" % only)
+                log(L("  探测点都太安静，认不出语言——按 REX_LANGS 的第一个（%s）转，"
+                      "不对就 --lang 指定",
+                      "  Every probe point was too quiet to identify the language; transcribing as the first "
+                      "language in REX_LANGS (%s). If that's wrong, set it with --lang") % only)
+            log(L("  语言：%s（整段一致）", "  Language: %s (same throughout)") % only)
             # 探到了就显式指定，别再让 whisper 自己猜一遍
             rc = run_whisper(a.model, a.audio, a.out, only,
                              prompt if only == "zh" else "",
                              vad, a.vad_pad, a.vad_model, log, 0.0)
             return 0 if os.path.exists(a.out + ".txt") else (rc or 1)
 
-        log("  语言分段：" + " · ".join(
+        log(L("  语言分段：", "  Language segments: ") + " · ".join(
             "%s %s–%s" % (l, short(s), short(e)) for s, e, l in runs))
-        log("  分 %d 段各按自己的语言转写（whisper 只在开头认一次语言，"
-            "不分段的话后面全按第一种语言硬解）" % len(runs))
+        log(L("  分 %d 段各按自己的语言转写（whisper 只在开头认一次语言，"
+              "不分段的话后面全按第一种语言硬解）",
+              "  Transcribing %d segments, each in its own language (whisper identifies the language only "
+              "once, at the start; unsegmented, everything after it would be forced into the first language)")
+            % len(runs))
 
         txts, srts, idx = [], [], 1
         for i, (s, e, l) in enumerate(runs):
             part = os.path.join(tmp, "part%d.wav" % i)
             if not slice_wav(a.audio, s, e - s, part):
-                log("  ⚠️ 第 %d 段切不出来（%s–%s），跳过" % (i + 1, hhmmss(s), hhmmss(e)))
+                log(L("  ⚠️ 第 %d 段切不出来（%s–%s），跳过", "  ⚠️ Couldn't cut out segment %d (%s–%s); skipped")
+                    % (i + 1, hhmmss(s), hhmmss(e)))
                 continue
             stem = os.path.join(tmp, "part%d" % i)
-            log("\n  ── 第 %d/%d 段 · %s · %s–%s ──"
+            log(L("\n  ── 第 %d/%d 段 · %s · %s–%s ──", "\n  ── Segment %d/%d · %s · %s–%s ──")
                 % (i + 1, len(runs), l, short(s), short(e)))
             rc = run_whisper(a.model, part, stem, l,
                              prompt if l == "zh" else "",
                              vad, a.vad_pad, a.vad_model, log, s, hide_paths=True)
             if rc:
                 # 原来不看退出码：whisper 中途挂了，半截输出照样并进去，稿子看着正常、只是短了
-                log("  ⚠️ 第 %d 段 whisper 退出码 %d，这一段可能不完整" % (i + 1, rc))
+                log(L("  ⚠️ 第 %d 段 whisper 退出码 %d，这一段可能不完整",
+                      "  ⚠️ Segment %d: whisper exited with code %d; this segment may be incomplete")
+                    % (i + 1, rc))
             if os.path.exists(stem + ".txt"):
                 t = open(stem + ".txt", "rb").read().decode("utf-8", "replace")
                 if t.strip():
@@ -433,13 +449,14 @@ def main():
                     srts.append(block)
 
         if not txts:
-            log("  ⚠️ 分段转写一段都没出内容")
+            log(L("  ⚠️ 分段转写一段都没出内容", "  ⚠️ None of the segments produced any text"))
             return 1
         with open(a.out + ".txt", "w", encoding="utf-8") as fh:
             fh.write("\n".join(txts) + "\n")
         with open(a.out + ".srt", "w", encoding="utf-8") as fh:
             fh.write("\n\n".join(srts) + "\n")
-        log("\n  %d 段合并完成（时间轴已按各段起点校正）" % len(runs))
+        log(L("\n  %d 段合并完成（时间轴已按各段起点校正）",
+              "\n  Merged %d segments (timestamps shifted to each segment's start)") % len(runs))
     return 0
 
 

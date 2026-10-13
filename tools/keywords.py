@@ -39,6 +39,8 @@ import re
 import sys
 from collections import Counter
 
+from i18n import L
+
 # 单字虚词。只用来判断 n-gram 的**首尾**，不用来判断中间——
 # 「有意思」中间是「意」，按首尾判没问题；按整体判就把它误杀了。
 EDGE = set(
@@ -260,12 +262,14 @@ def extract(text, glossary=(), n=3, max_chars=6):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="从转写稿抽关键词，用于文件命名")
+    ap = argparse.ArgumentParser(description=L("从转写稿抽关键词，用于文件命名",
+                                               "Extract keywords from a transcript, for naming files"))
     ap.add_argument("path")
-    ap.add_argument("-n", type=int, default=3, help="抽几个词，默认 3")
-    ap.add_argument("--glossary", default="", help="whisper-prompt.txt 的路径")
+    ap.add_argument("-n", type=int, default=3, help=L("抽几个词，默认 3", "number of keywords, default 3"))
+    ap.add_argument("--glossary", default="", help=L("whisper-prompt.txt 的路径", "path to whisper-prompt.txt"))
     ap.add_argument("--sep", default="-")
-    ap.add_argument("--verbose", action="store_true", help="连分数一起打印，调词表时用")
+    ap.add_argument("--verbose", action="store_true",
+                    help=L("连分数一起打印，调词表时用", "print with scores, for tuning the word lists"))
     a = ap.parse_args()
 
     if not os.path.exists(a.path):

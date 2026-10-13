@@ -54,6 +54,7 @@
 #   REX_DIR=目录        录音存哪，默认 ~/Recordings
 #   REX_SYS=tap|blackhole   录电脑声音走哪条路，临时覆盖 rex check sys 的结果
 #   REX_APP_PORT=端口   录音台的端口，默认 8790
+#   REX_LANG=zh|en      输出语言，默认跟 macOS 的首选语言（也可以写进 ~/.config/rex/lang）
 #
 # 文件一律落在 ~/Recordings/，名字形如 2026-08-16_143052_sys.m4a。
 # 转写结果就放在音频旁边，同名的 .txt 和 .srt。
@@ -138,36 +139,52 @@ VPAD=200
 C_R=$'\033[31m'; C_Y=$'\033[33m'; C_G=$'\033[32m'; C_D=$'\033[2m'; C_0=$'\033[0m'
 if [ ! -t 1 ]; then C_R=""; C_Y=""; C_G=""; C_D=""; C_0=""; fi
 
+# 输出语言：REX_LANG=en|zh；没设就看 ~/.config/rex/lang；再没有就跟 macOS 的首选语言（中文 → zh，其余 → en）。
+# 解析一次就导出，子进程（Python 脚本、audiocap、录音台）都按同一个来
+rex_lang() {
+  case "${REX_LANG:-}" in en|zh) printf '%s' "$REX_LANG"; return ;; esac
+  l=$(cat "$HOME/.config/rex/lang" 2>/dev/null | tr -d ' \n')
+  case "$l" in en|zh) printf '%s' "$l"; return ;; esac
+  case "$(defaults read -g AppleLanguages 2>/dev/null | tr -d ' \n"(' | cut -d, -f1)" in zh*) printf zh ;; *) printf en ;; esac
+}
+REX_LANG=$(rex_lang); export REX_LANG
+EN=""; [ "$REX_LANG" = en ] && EN=1
+
 say()  { printf '%s\n' "$*"; }
 warn() { printf '%s%s%s\n' "$C_Y" "$*" "$C_0"; }
-die()  { printf '%s错误：%s%s\n' "$C_R" "$*" "$C_0" >&2; exit 1; }
-need() { command -v "$1" >/dev/null 2>&1 || die "找不到 $1。安装：$2"; }
+die()  { printf '%s%s%s%s\n' "$C_R" "$(L '错误：' 'Error: ')" "$*" "$C_0" >&2; exit 1; }
+# 双语输出：中文在前、英文在后，按 REX_LANG 挑一个。变量照常写在两边的字符串里（紧挨中文的写 ${var}）
+L()     { if [ -n "$EN" ]; then printf '%s' "$2"; else printf '%s' "$1"; fi; }
+sayL()  { if [ -n "$EN" ]; then say "$2"; else say "$1"; fi; }
+warnL() { if [ -n "$EN" ]; then warn "$2"; else warn "$1"; fi; }
+dieL()  { if [ -n "$EN" ]; then die "$2"; else die "$1"; fi; }
+need() { command -v "$1" >/dev/null 2>&1 || dieL "找不到 $1。安装：$2" "$1 not found. Install: $2"; }
 
 # audiodev 是本仓库的 Swift 小工具，源码比二进制新就重编。
 ensure_ad() {
   if [ ! -x "$AD" ] || [ "$AD_SRC" -nt "$AD" ]; then
-    need swiftc "装 Xcode 命令行工具：xcode-select --install"
+    need swiftc "$(L '装 Xcode 命令行工具：xcode-select --install' 'xcode-select --install (Xcode command line tools)')"
     mkdir -p "$(dirname "$AD")"
-    say "${C_D}编译 audiodev…${C_0}"
-    swiftc -O -o "$AD" "$AD_SRC" || die "编译 audiodev 失败"
+    sayL "${C_D}编译 audiodev…${C_0}" "${C_D}Compiling audiodev…${C_0}"
+    swiftc -O -o "$AD" "$AD_SRC" || dieL "编译 audiodev 失败" "Failed to compile audiodev"
   fi
 }
 
 ensure_cap() {
   if [ ! -x "$CAP" ] || [ "$CAP_SRC" -nt "$CAP" ] || [ "$CAP_PLIST" -nt "$CAP" ]; then
-    need swiftc "装 Xcode 命令行工具：xcode-select --install"
+    need swiftc "$(L '装 Xcode 命令行工具：xcode-select --install' 'xcode-select --install (Xcode command line tools)')"
     mkdir -p "$(dirname "$CAP")"
-    say "${C_D}编译 audiocap…${C_0}"
+    sayL "${C_D}编译 audiocap…${C_0}" "${C_D}Compiling audiocap…${C_0}"
     # Info.plist 链接进二进制，再用 codesign 重签一次把它绑进签名：macOS 弹授权框时从签名里读程序名
     # 和用途说明，链接器自带的 ad-hoc 签名不绑 Info.plist（codesign -dvvv 看到 Info.plist=not bound）。
     # 重编之后 cdhash 变了，系统会把它当新程序，麦克风/系统声音要重新授权一次（audiocap.swift「权限」一节）
     # 编到临时文件、签完再原子换上：中途失败不留一个「比源码新、却没绑 Info.plist」的半成品（那样不会再重编，
     # 系统也不弹授权框）；录音中 rex check 触发重编也不会把正在跑的二进制换掉
     swiftc -O -o "$CAP.tmp.$$" "$CAP_SRC" \
-      -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$CAP_PLIST" || { rm -f "$CAP.tmp.$$"; die "编译 audiocap 失败"; }
-    codesign -s - -f "$CAP.tmp.$$" 2>/dev/null || { rm -f "$CAP.tmp.$$"; die "签名 audiocap 失败"; }
+      -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$CAP_PLIST" || { rm -f "$CAP.tmp.$$"; dieL "编译 audiocap 失败" "Failed to compile audiocap"; }
+    codesign -s - -f "$CAP.tmp.$$" 2>/dev/null || { rm -f "$CAP.tmp.$$"; dieL "签名 audiocap 失败" "Failed to sign audiocap"; }
     mv -f "$CAP.tmp.$$" "$CAP"
-    warn "audiocap 重编了：下次录音 / rex check 会再问一次麦克风和系统声音的授权（授权记在它自己头上）"
+    warnL "audiocap 重编了：下次录音 / rex check 会再问一次麦克风和系统声音的授权（授权记在它自己头上）" "audiocap was rebuilt: the next recording / rex check will ask again for microphone and system audio permission (the permission belongs to audiocap itself)"
   fi
 }
 
@@ -184,17 +201,17 @@ add_capture() {
     # （重编 audiocap 之后第一次开录必然撞上）。出错把它原样报出来，成功也打给人看
     ie="$CAP_DIR/$tag.info.err"
     if ! info=$("$CAP" "$pat" --info 2>"$ie"); then
-      msg=$(cat "$ie" 2>/dev/null); stop_caps; teardown_passthru "$PT_RESTORE" "$PT_UID"; die "${msg:-audiocap --info 失败}"
+      msg=$(cat "$ie" 2>/dev/null); stop_caps; teardown_passthru "$PT_RESTORE" "$PT_UID"; die "${msg:-$(L 'audiocap --info 失败' 'audiocap --info failed')}"
     fi
     [ -s "$ie" ] && cat "$ie" >&2
   fi
   info=$(printf '%s\n' "$info" | grep -E '^[0-9]+ [0-9]+ ' | head -1)
-  [ -n "$info" ] || { stop_caps; teardown_passthru "$PT_RESTORE" "$PT_UID"; die "audiocap 没报出「采样率 声道 名字」（$(cat "${ie:-/dev/null}" 2>/dev/null | tail -1)）"; }
+  [ -n "$info" ] || { stop_caps; teardown_passthru "$PT_RESTORE" "$PT_UID"; dieL "audiocap 没报出「采样率 声道 名字」（$(cat "${ie:-/dev/null}" 2>/dev/null | tail -1)）" "audiocap did not report \"sample rate, channels, name\" ($(cat "${ie:-/dev/null}" 2>/dev/null | tail -1))"; }
   r=$(printf '%s' "$info" | awk '{print $1}')
   c=$(printf '%s' "$info" | awk '{print $2}')
   eval "CAPNAME_${tag}=\$(printf '%s' \"\$info\" | cut -d' ' -f3-)"
   fifo="$CAP_DIR/$tag.f32"
-  mkfifo "$fifo" || { stop_caps; teardown_passthru "$PT_RESTORE" "$PT_UID"; die "建不了命名管道 $fifo"; }
+  mkfifo "$fifo" || { stop_caps; teardown_passthru "$PT_RESTORE" "$PT_UID"; dieL "建不了命名管道 $fifo" "Cannot create the named pipe $fifo"; }
   # 打开 FIFO 的写端会阻塞到 ffmpeg 来读，所以放后台；$! 在 exec 之后就是 audiocap 本身
   nohup "$CAP" "$pat" --level "$CAP_DIR/$tag.level" > "$fifo" 2>>"$LOG" &
   caps="$caps $!"
@@ -264,7 +281,7 @@ mic_pattern() {
 pick_mic() {
   want=$(mic_pattern "$1")
   i=$(avf_index "$want")
-  [ -n "$i" ] || die "找不到叫「${want}」的麦克风。跑 rex devices 看看有哪些。"
+  [ -n "$i" ] || dieL "找不到叫「${want}」的麦克风。跑 rex devices 看看有哪些。" "No microphone named \"${want}\". Run rex devices to see which ones there are."
   printf '%s' "$i"
 }
 
@@ -274,30 +291,30 @@ pick_mic() {
 # 回声两行：restore_uid（要切回去的设备）和 passthru_uid（临时建的，要删掉）。
 setup_passthru() {
   bh=$("$AD" list | awk -F'\t' 'tolower($3) ~ /blackhole/ { print $1; exit }')
-  [ -n "$bh" ] || die "系统里没有 BlackHole。装：brew install blackhole-2ch（装完要重启一次）"
+  [ -n "$bh" ] || dieL "系统里没有 BlackHole。装：brew install blackhole-2ch（装完要重启一次）" "BlackHole is not installed. Install: brew install blackhole-2ch (reboot once afterwards)"
 
-  cur=$("$AD" default) || die "读不到当前输出设备"
+  cur=$("$AD" default) || dieL "读不到当前输出设备" "Cannot read the current output device"
 
   # 当前输出本来就带着 BlackHole（比如你手建的 Multi-Output Device 正在用），
   # 那就什么都别动——不动是最好的，音量键、耳机、一切照旧。
   if "$AD" members "$cur" 2>/dev/null | grep -qx "$bh"; then
     PT_RESTORE=""; PT_UID=""
-    PT_NOTE="当前输出已经带 BlackHole，不动任何设置"
+    PT_NOTE=$(L "当前输出已经带 BlackHole，不动任何设置" "The current output already includes BlackHole; nothing is changed")
     return 0
   fi
 
   curname=$("$AD" name "$cur" 2>/dev/null)
   # 主时钟固定 BlackHole：蓝牙当主时钟会把自己的抖动写进录音，其余成员自动开漂移校正。
-  PT_UID=$("$AD" make "录音直通（${curname}）" "$bh" "$bh" "$cur") \
-    || die "建不出直通设备。如果你当前输出本身就是个聚合设备，先在菜单栏切回普通的耳机/喇叭。"
-  "$AD" use "$PT_UID" || { "$AD" destroy "$PT_UID"; die "切不到直通设备"; }
+  PT_UID=$("$AD" make "$(L "录音直通（${curname}）" "Recording passthrough (${curname})")" "$bh" "$bh" "$cur") \
+    || dieL "建不出直通设备。如果你当前输出本身就是个聚合设备，先在菜单栏切回普通的耳机/喇叭。" "Couldn't create the passthrough device. If your current output is itself an aggregate device, switch back to ordinary headphones or speakers in the menu bar first."
+  "$AD" use "$PT_UID" || { "$AD" destroy "$PT_UID"; dieL "切不到直通设备" "Cannot switch to the passthrough device"; }
   PT_RESTORE="$cur"
-  PT_NOTE="声音继续走「${curname}」，同时抄一份给 BlackHole"
+  PT_NOTE=$(L "声音继续走「${curname}」，同时抄一份给 BlackHole" "Sound keeps playing on \"${curname}\", with a copy sent to BlackHole")
 }
 
 teardown_passthru() {
   r="$1"; p="$2"
-  [ -n "$r" ] && { "$AD" use "$r" >/dev/null 2>&1 || warn "切不回原来的输出设备，去菜单栏手动选一下。"; }
+  [ -n "$r" ] && { "$AD" use "$r" >/dev/null 2>&1 || warnL "切不回原来的输出设备，去菜单栏手动选一下。" "Could not switch back to the original output device; pick it manually in the menu bar."; }
   [ -n "$p" ] && "$AD" destroy "$p" >/dev/null 2>&1
 }
 
@@ -322,12 +339,12 @@ sys_setup() {
     if SYS_INFO=$("$CAP" --system --info 2>"$REX_DIR/.taperr" | grep -E '^[0-9]+ [0-9]+ ' | head -1) && [ -n "$SYS_INFO" ]; then
       rm -f "$REX_DIR/.taperr"
       SYSPAT="--system"; sysidx="tap"
-      PT_NOTE="系统声音走系统音频接口，输出设备不动（AirPods 自动切换也不影响）"
+      PT_NOTE=$(L "系统声音走系统音频接口，输出设备不动（AirPods 自动切换也不影响）" "System audio goes through the system audio tap; the output device is left alone (AirPods auto-switching doesn't affect it)")
       return
     fi
     taperr=$(tail -1 "$REX_DIR/.taperr" 2>/dev/null); rm -f "$REX_DIR/.taperr"
-    warn "系统音频接口这会儿用不了：${taperr:-audiocap 没说原因}"
-    warn "这次先走 BlackHole 直通（输出被切走会自动接回）；跑一次 rex check sys 能把接口要回来。"
+    warnL "系统音频接口这会儿用不了：${taperr:-audiocap 没说原因}" "The system audio tap is unavailable right now: ${taperr:-audiocap gave no reason}"
+    warnL "这次先走 BlackHole 直通（输出被切走会自动接回）；跑一次 rex check sys 能把接口要回来。" "Using the BlackHole passthrough this time (if the output gets switched away, it is reconnected automatically); run rex check sys once to get the tap back."
   fi
   setup_passthru; SYSPAT="BlackHole"; sysidx=$(avf_index "BlackHole")
 }
@@ -352,7 +369,7 @@ clean_stale_passthru() {
     if [ "$u" = "$cur" ]; then
       real=$("$AD" members "$u" 2>/dev/null | grep -vi blackhole | head -1)
       [ -n "$real" ] && "$AD" use "$real" >/dev/null 2>&1
-      say "  ${C_D}上次留下的「$("$AD" name "$u" 2>/dev/null)」还占着输出，切回「$("$AD" name "$real" 2>/dev/null)」${C_0}"
+      sayL "  ${C_D}上次留下的「$("$AD" name "$u" 2>/dev/null)」还占着输出，切回「$("$AD" name "$real" 2>/dev/null)」${C_0}" "  ${C_D}\"$("$AD" name "$u" 2>/dev/null)\", left over from last time, still held the output; switched back to \"$("$AD" name "$real" 2>/dev/null)\"${C_0}"
     fi
     "$AD" destroy "$u" >/dev/null 2>&1
   done
@@ -372,7 +389,7 @@ orphan_recs() {
 # 它那个 audiocap 下次往管道里写会收到 EPIPE，自己退。
 reap_orphans() {
   orphan_recs | while read -r p f; do
-    warn "  后台有一条没停掉的录音还在跑：$(basename "${f:-?}")，先把它停下、收好尾"
+    warnL "  后台有一条没停掉的录音还在跑：$(basename "${f:-?}")，先把它停下、收好尾" "  A recording that was never stopped is still running in the background: $(basename "${f:-?}"); stopping it and finalizing the file first"
     kill -INT "$p" 2>/dev/null
     for _ in $(seq 1 150); do kill -0 "$p" 2>/dev/null || break; sleep 0.1; done
     kill -0 "$p" 2>/dev/null && kill -TERM "$p" 2>/dev/null
@@ -405,26 +422,26 @@ route_loop() {
     cur=$("$AD" default 2>/dev/null)
     curname=$("$AD" name "$cur" 2>/dev/null)
     if [ "$n" -ge 3 ]; then
-      m="输出一分钟里被切走了 3 次以上（现在是「${curname:-?}」），不再自动接回，系统声音从现在起录不进来"
+      m=$(L "输出一分钟里被切走了 3 次以上（现在是「${curname:-?}」），不再自动接回，系统声音从现在起录不进来" "Output was switched away 3+ times within a minute (now '${curname:-?}'); no longer reconnecting, so system audio isn't recorded from now on")
       printf '%s  %s\n' "$(date +%H:%M:%S)" "$m" >> "$WATCH_LOG"
-      osascript -e "display notification \"${m}\" with title \"rex 录音警告\" sound name \"Basso\"" 2>/dev/null
+      osascript -e "display notification \"${m}\" with title \"$(L 'rex 录音警告' 'rex recording warning')\" sound name \"Basso\"" 2>/dev/null
       break
     fi
-    new=$("$AD" make "录音直通（${curname}）" "$bh" "$bh" "$cur" 2>/dev/null)
+    new=$("$AD" make "$(L "录音直通（${curname}）" "Recording passthrough (${curname})")" "$bh" "$bh" "$cur" 2>/dev/null)
     if [ -n "$new" ] && "$AD" use "$new" >/dev/null 2>&1; then
       old=$(getf passthru)
       [ -n "$old" ] && [ "$old" != "$new" ] && "$AD" destroy "$old" >/dev/null 2>&1
       set_state restore "$cur"
       set_state passthru "$new"
       fixes="$fixes $now"
-      m="输出被切到「${curname}」，已经重新接上，系统声音接着录"
+      m=$(L "输出被切到「${curname}」，已经重新接上，系统声音接着录" "Output was switched to '${curname}'; reconnected, system audio keeps recording")
       printf '%s  %s\n' "$(date +%H:%M:%S)" "$m" >> "$WATCH_LOG"
       osascript -e "display notification \"${m}\" with title \"rex\"" 2>/dev/null
     else
       [ -n "$new" ] && "$AD" destroy "$new" >/dev/null 2>&1
-      m="输出被切到「${curname:-?}」，接不回去（它可能本身是个聚合设备），系统声音录不进来"
+      m=$(L "输出被切到「${curname:-?}」，接不回去（它可能本身是个聚合设备），系统声音录不进来" "Output was switched to '${curname:-?}' and can't be reconnected (it may itself be an aggregate device); system audio isn't being recorded")
       printf '%s  %s\n' "$(date +%H:%M:%S)" "$m" >> "$WATCH_LOG"
-      osascript -e "display notification \"${m}\" with title \"rex 录音警告\" sound name \"Basso\"" 2>/dev/null
+      osascript -e "display notification \"${m}\" with title \"$(L 'rex 录音警告' 'rex recording warning')\" sound name \"Basso\"" 2>/dev/null
       sleep 20
     fi
   done
@@ -478,17 +495,17 @@ watch_track() {
     lf=$(sed -nE 's/.*"last_frame_t": ([0-9]+).*/\1/p' "$CAP_DIR/$tag.level" 2>/dev/null)
     fr=$(sed -nE 's/.*"frames": ([0-9]+).*/\1/p' "$CAP_DIR/$tag.level" 2>/dev/null)
     pf="$REX_DIR/.watch-frames-$tag"; prev=$(cat "$pf" 2>/dev/null); printf '%s' "${fr:-0}" > "$pf"
-    if [ $((now - ${3:-0})) -gt 10 ]; then dead=1; p="${label}的采集停了（电平文件 $((now - ${3:-0})) 秒没更新）"
-    elif [ -n "$lf" ] && [ $((now - lf)) -gt 10 ]; then dead=1; p="${label}的采集停了（$((now - lf)) 秒没有新帧）"
-    elif [ -n "$prev" ] && [ "${fr:-0}" = "$prev" ]; then dead=1; p="${label}的采集卡住了（帧数不涨）"
-    elif [ "$kind" = mic ] && [ "${2:-0}" -gt 0 ] && [ $((now - $2)) -ge 3 ]; then dead=1; p="${label}没信号（数字零 $((now - $2)) 秒）"
+    if [ $((now - ${3:-0})) -gt 10 ]; then dead=1; p=$(L "${label}的采集停了（电平文件 $((now - ${3:-0})) 秒没更新）" "${label} capture stopped (level file not updated for $((now - ${3:-0})) s)")
+    elif [ -n "$lf" ] && [ $((now - lf)) -gt 10 ]; then dead=1; p=$(L "${label}的采集停了（$((now - lf)) 秒没有新帧）" "${label} capture stopped (no new frames for $((now - lf)) s)")
+    elif [ -n "$prev" ] && [ "${fr:-0}" = "$prev" ]; then dead=1; p=$(L "${label}的采集卡住了（帧数不涨）" "${label} capture is stuck (frame count not increasing)")
+    elif [ "$kind" = mic ] && [ "${2:-0}" -gt 0 ] && [ $((now - $2)) -ge 3 ]; then dead=1; p=$(L "${label}没信号（数字零 $((now - $2)) 秒）" "${label} has no signal (digital zero for $((now - $2)) s)")
     fi
   else
-    dead=1; p="${label}的采集没在出数据（没有电平文件）"
+    dead=1; p=$(L "${label}的采集没在出数据（没有电平文件）" "${label} capture is not producing data (no level file)")
   fi
   if [ "$dead" = 0 ] && [ "$kind" = sys ] && [ "$(getf sys)" != tap ] && ! sys_route_ok; then
     cn=$("$AD" name "$("$AD" default 2>/dev/null)" 2>/dev/null)
-    dead=1; p="${label}断了：当前输出「${cn:-?}」里没有 BlackHole"
+    dead=1; p=$(L "${label}断了：当前输出「${cn:-?}」里没有 BlackHole" "${label} is cut off: the current output '${cn:-?}' doesn't include BlackHole")
   fi
   watch_report "$label" "$tag" "$dead" "$p" "$kind"
 }
@@ -501,12 +518,12 @@ watch_report() {
   printf '%s' "$dead" > "$sf"
 
   if [ "$dead" = 1 ] && [ "$was" != 1 ]; then
-    m="${detail}，从现在起这一路录不进东西"
+    m=$(L "${detail}，从现在起这一路录不进东西" "${detail}; this track records nothing from now on")
     printf '%s  %s\n' "$(date +%H:%M:%S)" "$m" >> "$WATCH_LOG"
     # 故意不加提示音——正在录系统声音的话，提示音会被录进去
-    osascript -e "display notification \"${m}\" with title \"rex 录音警告\"" 2>/dev/null
+    osascript -e "display notification \"${m}\" with title \"$(L 'rex 录音警告' 'rex recording warning')\"" 2>/dev/null
   elif [ "$dead" = 0 ] && [ "$was" = 1 ]; then
-    printf '%s  %s\n' "$(date +%H:%M:%S)" "${label}又恢复了" >> "$WATCH_LOG"
+    printf '%s  %s\n' "$(date +%H:%M:%S)" "$(L "${label}又恢复了" "${label} recovered")" >> "$WATCH_LOG"
   fi
 }
 
@@ -518,20 +535,20 @@ watch_loop() {
     { [ "$WATCH_EVERY" -gt 0 ] 2>/dev/null && [ "$n" -ge "$WATCH_EVERY" ]; } || continue
     n=0
     case "$mode" in
-      mic)  watch_track "麦克风" mic mic ;;
-      sys)  watch_track "系统声音" sys sys ;;
-      both) watch_track "麦克风" mic mic
-            watch_track "系统声音" sys sys ;;
+      mic)  watch_track "$(L '麦克风' 'Microphone')" mic mic ;;
+      sys)  watch_track "$(L '系统声音' 'System audio')" sys sys ;;
+      both) watch_track "$(L '麦克风' 'Microphone')" mic mic
+            watch_track "$(L '系统声音' 'System audio')" sys sys ;;
     esac
   done
   # ffmpeg 没了而状态文件还指着它：不是 rex stop 停的（stop 一进来就把状态文件改名认领了）。到了时长上限、
   # 设备断了、磁盘满了都走到这里——不收尾的话直通设备一直占着输出、状态文件带着死 PID 留着、没人知道录音停了
   if [ "$(getf pid)" = "$ffpid" ]; then
-    why=$(grep 'audiocap' "$LOG" 2>/dev/null | grep -v '在读「' | tail -1)   # 「在读」是开工那行，不是原因
+    why=$(grep 'audiocap' "$LOG" 2>/dev/null | grep -v -e '在读「' -e 'audiocap: reading "' | tail -1)   # 「在读」是开工那行，不是原因
     "$SELF" stop > "$REX_DIR/.laststop.log" 2>&1
-    m="录音自己停了：${why:-可能到了时长上限}。文件已收尾，rex ls 看结果"
+    m=$(L "录音自己停了：${why:-可能到了时长上限}。文件已收尾，rex ls 看结果" "Recording stopped by itself: ${why:-probably reached the length limit}. The file is finalized; see rex ls")
     printf '%s  %s\n' "$(date +%H:%M:%S)" "$m" >> "$REX_DIR/.laststop.log"
-    osascript -e "display notification \"${m}\" with title \"rex 录音停了\" sound name \"Basso\"" 2>/dev/null
+    osascript -e "display notification \"$(printf '%s' "$m" | tr '"' "'")\" with title \"$(L 'rex 录音停了' 'rex recording stopped')\" sound name \"Basso\"" 2>/dev/null
   fi
 }
 
@@ -551,7 +568,7 @@ start_cleanup() {
     stop_caps
     teardown_passthru "${PT_RESTORE:-}" "${PT_UID:-}"
     [ -n "${pid:-}" ] && rm -f "$STATE"
-    [ -n "${pid:-}" ] && warn "没开成，已经收拾干净（输出切回、状态文件删掉）。"
+    [ -n "${pid:-}" ] && warnL "没开成，已经收拾干净（输出切回、状态文件删掉）。" "Did not start; cleaned up (output switched back, state file removed)."
   fi
   rm -rf "$REX_DIR/.starting"
 }
@@ -567,12 +584,12 @@ start() {
     # 锁里记着持有者：它还活着就是真的在开（授权框最多等两分钟，开录可能很慢）；死了才算残留
     hp=$(cat "$REX_DIR/.starting/pid" 2>/dev/null)
     if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; then
-      die "正在开始录音（刚刚已经按过一次），等几秒看 rex status。"
+      dieL "正在开始录音（刚刚已经按过一次），等几秒看 rex status。" "A recording is already starting (you just pressed it); wait a few seconds and check rex status."
     fi
     if [ -z "$hp" ] && [ -n "$(find "$REX_DIR/.starting" -maxdepth 0 -mmin -2 2>/dev/null)" ]; then
-      die "正在开始录音（刚刚已经按过一次），等几秒看 rex status。"
+      dieL "正在开始录音（刚刚已经按过一次），等几秒看 rex status。" "A recording is already starting (you just pressed it); wait a few seconds and check rex status."
     fi
-    rm -rf "$REX_DIR/.starting"; mkdir "$REX_DIR/.starting" || die "建不了开录锁 ${REX_DIR}/.starting"
+    rm -rf "$REX_DIR/.starting"; mkdir "$REX_DIR/.starting" || dieL "建不了开录锁 ${REX_DIR}/.starting" "Cannot create the start lock ${REX_DIR}/.starting"
   fi
   echo $$ > "$REX_DIR/.starting/pid"
   pid=""; caps=""; PT_RESTORE=""; PT_UID=""; STARTED=""
@@ -581,14 +598,14 @@ start() {
   if [ -f "$STATE.stopping" ]; then
     # 上一条正在收尾（rex stop 一进来就把状态文件改名认领）。它的 rm 要是落在我们写完状态文件之后，新录音就成了孤儿
     if [ -n "$(find "$STATE.stopping" -maxdepth 0 -mmin -2 2>/dev/null)" ]; then
-      die "上一条正在收尾（rex stop 还没跑完），等几秒再开。"
+      dieL "上一条正在收尾（rex stop 还没跑完），等几秒再开。" "The previous recording is still being finalized (rex stop hasn't finished); wait a few seconds and try again."
     fi
     rm -f "$STATE.stopping"          # 两分钟以上没收完尾，是 stop 崩掉留下的；下面的清场会收拾残留
   fi
 
   if [ -f "$STATE" ]; then
-    if alive; then die "已经在录了（$(getf mode)）。先 rex stop，或者直接跑 rex 停掉。"; fi
-    warn "上次的状态文件是死的（进程没了），清掉重来。"
+    if alive; then dieL "已经在录了（$(getf mode)）。先 rex stop，或者直接跑 rex 停掉。" "Already recording ($(getf mode)). Run rex stop first, or just run rex to stop it."; fi
+    warnL "上次的状态文件是死的（进程没了），清掉重来。" "The state file from last time is stale (the process is gone); clearing it and starting over."
     stop_caps
     rm -f "$STATE"                   # 它的直通设备（还占着输出的话）由下面的 clean_stale_passthru 切回、拆掉
   fi
@@ -609,7 +626,7 @@ start() {
           sys_setup ;;
   esac
   if [ -n "$sysidx" ]; then :; elif [ "$mode" != "mic" ]; then
-    teardown_passthru "$PT_RESTORE" "$PT_UID"; die "avfoundation 里找不到 BlackHole"
+    teardown_passthru "$PT_RESTORE" "$PT_UID"; dieL "avfoundation 里找不到 BlackHole" "BlackHole not found in avfoundation"
   fi
 
   # 输入顺序不能变：麦克风在前（输入 0）、系统声音在后（输入 1），--split 的 -map 靠它。
@@ -694,11 +711,11 @@ start() {
     stop_caps
     teardown_passthru "$PT_RESTORE" "$PT_UID"
     rm -f "$STATE"
-    printf '%s没能开始采集。ffmpeg 说：%s\n' "$C_R" "$C_0"
+    printf "$(L '%s没能开始采集。ffmpeg 说：%s\n' '%sCapture did not start. ffmpeg says:%s\n')" "$C_R" "$C_0"
     tail -c 900 "$LOG"; say ""
-    warn "最常见的原因：麦克风没授权给「rex 录音采集」（audiocap）。"
-    say "  跑一次 rex check 会弹授权框；或者 系统设置 → 隐私与安全性 → 麦克风 → 打开「rex 录音采集」"
-    say "  （从 BlackHole 抓声音在系统看来也算「用麦克风」，同样要给。）"
+    warnL "最常见的原因：麦克风没授权给「rex 录音采集」（audiocap）。" "Most common cause: microphone permission was not granted to \"rex 录音采集\" (audiocap)."
+    sayL "  跑一次 rex check 会弹授权框；或者 系统设置 → 隐私与安全性 → 麦克风 → 打开「rex 录音采集」" "  Run rex check once to get the permission prompt, or go to System Settings → Privacy & Security → Microphone → turn on \"rex 录音采集\""
+    sayL "  （从 BlackHole 抓声音在系统看来也算「用麦克风」，同样要给。）" "  (To macOS, capturing from BlackHole also counts as \"using the microphone\", so it needs the same permission.)"
     exit 1
   fi
   # ffmpeg 有输出不代表每一路都活着（分轨时一路死了另一路照样写）：再看每一路的电平文件里 frames 有没有涨
@@ -712,10 +729,10 @@ start() {
     done
     [ -n "$got" ] && continue
     kill -INT "$pid" 2>/dev/null; stop_caps; teardown_passthru "$PT_RESTORE" "$PT_UID"; rm -f "$STATE"
-    case "$tag" in mic) nm="麦克风" ;; *) nm="系统声音" ;; esac
-    printf '%s%s这一路起了但不出数据，这次没开录。audiocap 说：%s\n' "$C_R" "$nm" "$C_0"
+    case "$tag" in mic) nm=$(L "麦克风" "microphone") ;; *) nm=$(L "系统声音" "system audio") ;; esac
+    printf "$(L '%s%s这一路起了但不出数据，这次没开录。audiocap 说：%s\n' '%sThe %s track started but delivers no data; not recording this time. audiocap says:%s\n')" "$C_R" "$nm" "$C_0"
     grep 'audiocap' "$LOG" | tail -3
-    [ "$tag" = sys ] && say "  走系统音频接口的话，跑一次 rex check sys 看它还通不通；REX_SYS=blackhole 可以先走老路。"
+    [ "$tag" = sys ] && sayL "  走系统音频接口的话，跑一次 rex check sys 看它还通不通；REX_SYS=blackhole 可以先走老路。" "  If you are using the system audio tap, run rex check sys to see whether it still works; REX_SYS=blackhole falls back to the old route for now."
     exit 1
   done
 
@@ -723,13 +740,13 @@ start() {
   trap - INT TERM
   say ""
   case "$mode" in
-    mic)  say "${C_G}● 在录麦克风${C_0}   ${CAPNAME_mic:-$(avf_name "$micidx")}" ;;
-    sys)  say "${C_G}● 在录系统声音${C_0}" ;;
-    both) say "${C_G}● 在录 麦克风 + 系统声音${C_0}   ${CAPNAME_mic:-$(avf_name "$micidx")}" ;;
+    mic)  sayL "${C_G}● 在录麦克风${C_0}   ${CAPNAME_mic:-$(avf_name "$micidx")}" "${C_G}● Recording the microphone${C_0}   ${CAPNAME_mic:-$(avf_name "$micidx")}" ;;
+    sys)  sayL "${C_G}● 在录系统声音${C_0}" "${C_G}● Recording system audio${C_0}" ;;
+    both) sayL "${C_G}● 在录 麦克风 + 系统声音${C_0}   ${CAPNAME_mic:-$(avf_name "$micidx")}" "${C_G}● Recording microphone + system audio${C_0}   ${CAPNAME_mic:-$(avf_name "$micidx")}" ;;
   esac
   printf '%s\n' "$files" | tr '|' '\n' | sed 's/^/  → /'
   [ -n "$PT_NOTE" ] && say "  ${C_D}$PT_NOTE${C_0}"
-  [ -n "$PT_UID" ] && say "  ${C_D}（这期间音量键不管用——多输出设备不支持，用 App 自己的音量条）${C_0}"
+  [ -n "$PT_UID" ] && sayL "  ${C_D}（这期间音量键不管用——多输出设备不支持，用 App 自己的音量条）${C_0}" "  ${C_D}(The volume keys don't work meanwhile: multi-output devices don't support them. Use the app's own volume slider.)${C_0}"
   # 合着盖时内建麦克风在**硬件上**是断开的（苹果的隐私设计）：系统照样列出这个设备，
   # 读出来却全是 0，和链路断了一模一样。2026-10-11 测试时撞上：录了 14 秒，
   # 麦克风那一轨 −91.0 dB，直接用 audiocap 读也是。开头就说，别等录完才发现。
@@ -738,36 +755,36 @@ start() {
     case "${CAPNAME_mic:-$(avf_name "$micidx")}" in *[Mm]ac[Bb]ook*) builtin_mic=1 ;; esac
   fi
   if [ -n "$builtin_mic" ] && lid_closed; then
-    warn "  ⚠ 笔记本合着盖：内建麦克风在硬件上是断开的，这一路录到的会是数字静音。"
-    warn "    开盖再录，或者 --device 换一个麦克风（耳机、iPhone）。"
+    warnL "  ⚠ 笔记本合着盖：内建麦克风在硬件上是断开的，这一路录到的会是数字静音。" "  ⚠ The laptop lid is closed: the built-in microphone is disconnected in hardware, so this track will record digital silence."
+    warnL "    开盖再录，或者 --device 换一个麦克风（耳机、iPhone）。" "    Open the lid and record again, or pick another microphone with --device (headphones, iPhone)."
   fi
   if [ -n "$micidx" ] && is_bluetooth_in "$(avf_name "$micidx")"; then
-    warn "  ⚠ 用的是蓝牙耳机的麦克风，耳机会掉进免提模式，播放声音跟着变糊。"
-    warn "    介意就加 --device \"MacBook Air Microphone\"。"
+    warnL "  ⚠ 用的是蓝牙耳机的麦克风，耳机会掉进免提模式，播放声音跟着变糊。" "  ⚠ Using a Bluetooth headset's microphone: the headset drops into hands-free mode and playback gets muddy."
+    warnL "    介意就加 --device \"MacBook Air Microphone\"。" "    If that bothers you, add --device \"MacBook Air Microphone\"."
   fi
   if [ "$SYSPAT" = BlackHole ] && [ "$ROUTE_EVERY" -gt 0 ] 2>/dev/null; then
     route_loop "$pid" >/dev/null 2>&1 &
     printf 'route=%s\n' "$!" >> "$STATE"
-    say "  ${C_D}输出被切走（戴上 AirPods、自动切换）会在两秒内自动接回${C_0}"
-    say "  ${C_D}更稳的录法：跑一次 rex check sys，换成系统音频接口（不改输出设备，AirPods 怎么切都不断）${C_0}"
+    sayL "  ${C_D}输出被切走（戴上 AirPods、自动切换）会在两秒内自动接回${C_0}" "  ${C_D}If the output gets switched away (putting on AirPods, auto-switching), it is reconnected within two seconds${C_0}"
+    sayL "  ${C_D}更稳的录法：跑一次 rex check sys，换成系统音频接口（不改输出设备，AirPods 怎么切都不断）${C_0}" "  ${C_D}More robust: run rex check sys once to switch to the system audio tap (the output device stays as is, however AirPods switch)${C_0}"
   fi
   # 看门狗总是起：REX_WATCH=0 只关掉逐路自查，「ffmpeg 自己退了要收尾」这一条不能关
   watch_loop "$pid" "$mode" >/dev/null 2>&1 &
   printf 'watch=%s\n' "$!" >> "$STATE"
   if [ "$WATCH_EVERY" -gt 0 ] 2>/dev/null; then
-    if [ "$WATCH_EVERY" -ge 60 ]; then ivl="$((WATCH_EVERY / 60)) 分钟"; else ivl="$WATCH_EVERY 秒"; fi
-    say "  ${C_D}每 ${ivl}自查一次，某一路断了会弹通知（关掉：REX_WATCH=0）${C_0}"
+    if [ "$WATCH_EVERY" -ge 60 ]; then ivl="$((WATCH_EVERY / 60)) $(L '分钟' 'min')"; else ivl="$WATCH_EVERY $(L '秒' 's')"; fi
+    sayL "  ${C_D}每 ${ivl}自查一次，某一路断了会弹通知（关掉：REX_WATCH=0）${C_0}" "  ${C_D}Self-check every ${ivl}; a notification pops up if a track drops (turn off: REX_WATCH=0)${C_0}"
   fi
   say ""
-  say "  停：${C_G}rex stop${C_0}    看状态：rex status"
-  say "  ${C_D}最长录 $((MAX_SECONDS / 3600)) 小时会自己停（改：REX_MAX=秒数）${C_0}"
+  sayL "  停：${C_G}rex stop${C_0}    看状态：rex status" "  Stop: ${C_G}rex stop${C_0}    Status: rex status"
+  sayL "  ${C_D}最长录 $((MAX_SECONDS / 3600)) 小时会自己停（改：REX_MAX=秒数）${C_0}" "  ${C_D}Stops by itself after $((MAX_SECONDS / 3600)) h (change: REX_MAX=seconds)${C_0}"
 }
 
 # ------------------------------------------------------------------ 停止
 
 report_file() {
   f="$1"
-  [ -f "$f" ] || { warn "  ✗ 没生成 $f"; return; }
+  [ -f "$f" ] || { warnL "  ✗ 没生成 $f" "  ✗ Not created: $f"; return; }
 
   dur=$(ffprobe -v quiet -show_entries format=duration -of csv=p=0 "$f" 2>/dev/null | cut -d. -f1)
   dur=${dur:-0}
@@ -781,14 +798,14 @@ report_file() {
   peak=$(printf '%s' "$vol" | awk '{print $2}')
 
   say "  ${C_G}✓${C_0} $f"
-  say "    $((dur / 60)) 分 $((dur % 60)) 秒 · $sz · 平均 ${mean:-?} dB / 峰值 ${peak:-?} dB"
+  sayL "    $((dur / 60)) 分 $((dur % 60)) 秒 · $sz · 平均 ${mean:-?} dB / 峰值 ${peak:-?} dB" "    $((dur / 60)) min $((dur % 60)) s · $sz · mean ${mean:-?} dB / peak ${peak:-?} dB"
 
   # 判据看峰值不看均值，理由见文件头最后一条。
   if [ -n "$peak" ] && awk -v p="$peak" 'BEGIN { exit !(p < -70) }'; then
-    warn "    ⚠ 几乎是数字静音，多半根本没收到信号。"
-    warn "      系统声音录空最常见的原因：源 App 的音量是 0，或者直通设备没建起来。"
+    warnL "    ⚠ 几乎是数字静音，多半根本没收到信号。" "    ⚠ Almost digital silence; most likely no signal arrived at all."
+    warnL "      系统声音录空最常见的原因：源 App 的音量是 0，或者直通设备没建起来。" "      Most common causes of empty system audio: the source app's volume is 0, or the passthrough device wasn't set up."
   elif [ -n "$peak" ] && awk -v p="$peak" 'BEGIN { exit !(p > -0.5) }'; then
-    warn "    ⚠ 峰值顶到满刻度了，可能削了顶。下次把源音量调小一点。"
+    warnL "    ⚠ 峰值顶到满刻度了，可能削了顶。下次把源音量调小一点。" "    ⚠ The peak hit full scale; it may have clipped. Turn the source volume down a little next time."
   fi
 
   # 分轨各看一眼。混音那条有声音不代表两路都进来了：2026-09-26 系统声音那一轨从第 1
@@ -800,21 +817,21 @@ report_file() {
       sm=$(silent_seconds "$f" "${st%% *}" "$dur"); ss=$(silent_seconds "$f" "${st##* }" "$dur")
       pm=$(awk -v s="$sm" -v d="$dur" 'BEGIN { printf "%d", (d > 0) ? 100 * s / d : 0 }')
       ps=$(awk -v s="$ss" -v d="$dur" 'BEGIN { printf "%d", (d > 0) ? 100 * s / d : 0 }')
-      say "    分轨：麦克风 ${C_D}数字静音 ${pm}%${C_0} · 系统声音 ${C_D}数字静音 ${ps}%${C_0}"
+      sayL "    分轨：麦克风 ${C_D}数字静音 ${pm}%${C_0} · 系统声音 ${C_D}数字静音 ${ps}%${C_0}" "    Separate tracks: microphone ${C_D}digital silence ${pm}%${C_0} · system audio ${C_D}digital silence ${ps}%${C_0}"
       # 真麦克风有本底噪声，出不了数字静音；出了就是读的那一头被掐断了：
       # 合着盖（内建麦克风硬件断开）或者被会议 App 抢走（使用说明「开会」）。
       # 系统声音的数字静音是正常现象（对方不出声就是 0），只有占了大半才提一句。
       if [ "$pm" -ge 20 ]; then
-        warn "    ⚠ 麦克风那一轨 ${pm}% 是数字静音——真麦克风不会这样"
-        warn "      要么笔记本合着盖（合盖时内建麦克风在硬件上断开），"
-        warn "      要么会议 App 把它抢走了：让会议 App 和 rex 用不同的麦克风（rex-使用说明「开会」）"
+        warnL "    ⚠ 麦克风那一轨 ${pm}% 是数字静音——真麦克风不会这样" "    ⚠ ${pm}% of the microphone track is digital silence; a real microphone never does that"
+        warnL "      要么笔记本合着盖（合盖时内建麦克风在硬件上断开），" "      Either the laptop lid is closed (the built-in microphone is disconnected in hardware then),"
+        warnL "      要么会议 App 把它抢走了：让会议 App 和 rex 用不同的麦克风（rex-使用说明「开会」）" "      or a meeting app took it over: give the meeting app and rex different microphones (manual, \"Meetings\")"
       fi
       if [ "$ps" -ge 50 ]; then
-        warn "    ⚠ 系统声音那一轨 ${ps}% 是数字静音——要么对方一直没出声，要么中途断了"
-        warn "      断了最常见的原因：录到一半戴上蓝牙耳机，声音绕过了 BlackHole（看下面看门狗的记录）"
+        warnL "    ⚠ 系统声音那一轨 ${ps}% 是数字静音——要么对方一直没出声，要么中途断了" "    ⚠ ${ps}% of the system audio track is digital silence: either the other side never spoke, or it dropped partway"
+        warnL "      断了最常见的原因：录到一半戴上蓝牙耳机，声音绕过了 BlackHole（看下面看门狗的记录）" "      Most common cause of a drop: putting on Bluetooth headphones mid-recording, so the sound bypassed BlackHole (see the watchdog log below)"
       fi
     fi
-    say "    ${C_D}含分轨，rex text 会按说话人出对话稿（麦克风 = 我，系统声音 = 对方）${C_0}"
+    sayL "    ${C_D}含分轨，rex text 会按说话人出对话稿（麦克风 = 我，系统声音 = 对方）${C_0}" "    ${C_D}Has separate tracks: rex text produces a dialogue transcript by speaker (microphone = me, system audio = the other side)${C_0}"
   fi
 
   # 末尾是不是一大段空白——忘了停的典型样子。只看最后 5 分钟，不整条扫
@@ -829,23 +846,23 @@ report_file() {
     tp=$(ffmpeg -hide_banner -nostats -sseof -300 -i "$f" -af volumedetect -f null - 2>&1 \
          | awk '/max_volume/ { print $(NF-1) }')
     if [ -n "$tp" ] && awk -v p="$tp" -v t="$th" 'BEGIN { exit !(p < t) }'; then
-      warn "    ⚠ 最后 5 分钟一直没声音（峰值 ${tp} dB），多半是忘了停。"
-      warn "      ${C_0}rex trim${C_Y} 切掉末尾空白（中间的停顿不动，原件进废纸篓）"
+      warnL "    ⚠ 最后 5 分钟一直没声音（峰值 ${tp} dB），多半是忘了停。" "    ⚠ No sound in the last 5 minutes (peak ${tp} dB); you probably forgot to stop."
+      warnL "      ${C_0}rex trim${C_Y} 切掉末尾空白（中间的停顿不动，原件进废纸篓）" "      ${C_0}rex trim${C_Y} cuts the trailing silence (pauses in the middle stay; the original goes to the Trash)"
     fi
   fi
 }
 
 stop() {
   if [ ! -f "$STATE" ]; then
-    if [ -n "$(orphan_recs)" ]; then reap_orphans; ensure_ad; clean_stale_passthru; say "收好了。"
-    else say "现在没有在录。"; fi
+    if [ -n "$(orphan_recs)" ]; then reap_orphans; ensure_ad; clean_stale_passthru; sayL "收好了。" "Stopped and finalized."
+    else sayL "现在没有在录。" "Not recording right now."; fi
     return 0
   fi
   ensure_ad
   # 一进来就把状态文件改名认领：收尾要几秒（报告里要 ffprobe、算静音），这期间要是又开了一条新录音，
   # 最后那句 rm 会把新录音的登记删掉、新录音成孤儿。改了名，start 看到 .stopping 就等，看不到 .current 也不会误判
   SF="$STATE.stopping"
-  mv "$STATE" "$SF" 2>/dev/null || { say "上一条正在收尾（另一个 rex stop 在跑）。"; return 0; }
+  mv "$STATE" "$SF" 2>/dev/null || { sayL "上一条正在收尾（另一个 rex stop 在跑）。" "The previous recording is being finalized (another rex stop is running)."; return 0; }
 
   pid=$(getf pid "$SF"); mode=$(getf mode "$SF"); files=$(getf files "$SF")
   t0=$(getf start "$SF"); el=$(( $(date +%s) - ${t0:-$(date +%s)} ))
@@ -860,12 +877,12 @@ stop() {
     # 等它写文件尾。m4a 的索引在末尾，硬杀 = 打不开的文件。
     for _ in $(seq 1 150); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
     if kill -0 "$pid" 2>/dev/null; then
-      warn "ffmpeg 15 秒没退出，强制结束。文件可能不完整。"
+      warnL "ffmpeg 15 秒没退出，强制结束。文件可能不完整。" "ffmpeg did not exit within 15 s; forcing it to stop. The file may be incomplete."
       kill -TERM "$pid" 2>/dev/null; sleep 1
     fi
   else
-    why=$(grep 'audiocap' "$LOG" 2>/dev/null | grep -v '在读「' | tail -1)
-    warn "录音进程已经不在了：${why:-日志里没有报错，多半是到了时长上限（REX_MAX，默认 $((MAX_SECONDS / 3600)) 小时）自己停的}"
+    why=$(grep 'audiocap' "$LOG" 2>/dev/null | grep -v -e '在读「' -e 'audiocap: reading "' | tail -1)
+    warnL "录音进程已经不在了：${why:-日志里没有报错，多半是到了时长上限（REX_MAX，默认 $((MAX_SECONDS / 3600)) 小时）自己停的}" "The recording process is already gone: ${why:-no error in the log; it most likely stopped itself at the length limit (REX_MAX, default $((MAX_SECONDS / 3600)) h)}"
   fi
 
   w=$(getf watch "$SF"); [ -n "$w" ] && [ "$w" != "$$" ] && kill "$w" 2>/dev/null
@@ -874,7 +891,7 @@ stop() {
   # 收尾前把采集进程报的溢出记下来（它在电平文件里）：缓冲溢出 = 文件里少了一段，看着却是完整的
   for tag in mic sys; do
     ov=$(sed -nE 's/.*"overrun": ([0-9]+).*/\1/p' "$CAP_DIR/$tag.level" 2>/dev/null)
-    [ "${ov:-0}" -gt 0 ] 2>/dev/null && warn "⚠ ${tag} 这一路缓冲溢出丢过 ${ov} 帧（下游写得太慢），这一段在文件里是缺的"
+    [ "${ov:-0}" -gt 0 ] 2>/dev/null && warnL "⚠ ${tag} 这一路缓冲溢出丢过 ${ov} 帧（下游写得太慢），这一段在文件里是缺的" "⚠ The ${tag} track lost ${ov} frame(s) to buffer overruns (the consumer was too slow); that part is missing from the file"
   done
   for c in $(getf caps "$SF"); do caps="${caps:-} $c"; done
   stop_caps
@@ -882,21 +899,21 @@ stop() {
   r=$(getf restore "$SF"); p=$(getf passthru "$SF")
   teardown_passthru "$r" "$p"
   clean_stale_passthru >/dev/null      # 路由监视被打断在半路时可能多建了一个
-  [ -n "$r" ] && say "${C_D}输出切回「$("$AD" name "$r" 2>/dev/null)」${C_0}"
+  [ -n "$r" ] && sayL "${C_D}输出切回「$("$AD" name "$r" 2>/dev/null)」${C_0}" "${C_D}Output switched back to \"$("$AD" name "$r" 2>/dev/null)\"${C_0}"
 
   say ""
-  say "录完了 · $mode · $((el / 60)) 分 $((el % 60)) 秒"
+  sayL "录完了 · $mode · $((el / 60)) 分 $((el % 60)) 秒" "Recording finished · $mode · $((el / 60)) min $((el % 60)) s"
   printf '%s\n' "$files" | tr '|' '\n' | while IFS= read -r f; do
     [ -n "$f" ] && report_file "$f"
   done
   if [ -s "$WATCH_LOG" ]; then
     say ""
-    warn "录制期间的路由和看门狗记录："
+    warnL "录制期间的路由和看门狗记录：" "Routing and watchdog log during the recording:"
     while IFS= read -r ln; do say "  $ln"; done < "$WATCH_LOG"
   fi
   say ""
-  say "  文件夹：$REX_DIR    ${C_D}（rex open 在访达里打开）${C_0}"
-  say "  ${C_D}一条龙（转写 → 分人 → Claude 校对 → 分析）：${C_0}rex go"
+  sayL "  文件夹：$REX_DIR    ${C_D}（rex open 在访达里打开）${C_0}" "  Folder: $REX_DIR    ${C_D}(rex open opens it in Finder)${C_0}"
+  sayL "  ${C_D}一条龙（转写 → 分人 → Claude 校对 → 分析）：${C_0}rex go" "  ${C_D}End-to-end pipeline (transcribe → diarize → Claude proofreading → analysis): ${C_0}rex go"
   rm -f "$SF"
 }
 
@@ -949,26 +966,26 @@ except OSError as e:
 phone() {
   case "$(phone_probe)" in
     NODIR)
-      die "找不到语音备忘录的同步目录。iPhone 上「设置 → 你的名字 → iCloud → 语音备忘录」要打开。" ;;
+      dieL "找不到语音备忘录的同步目录。iPhone 上「设置 → 你的名字 → iCloud → 语音备忘录」要打开。" "Voice Memos sync folder not found. On the iPhone, turn on \"Settings → your name → iCloud → Voice Memos\"." ;;
     DENIED)
-      printf '%s读不了语音备忘录目录——是权限问题，不是没有文件。%s\n' "$C_R" "$C_0" >&2
-      say "  系统设置 → 隐私与安全性 → 完整磁盘访问权限 → 把你的终端 App 加进去，"
-      say "  然后**完全退出终端再打开**（改完权限不重启进程不生效）。"
+      printf "$(L '%s读不了语音备忘录目录——是权限问题，不是没有文件。%s\n' '%sCannot read the Voice Memos folder. This is a permission problem, not missing files.%s\n')" "$C_R" "$C_0" >&2
+      sayL "  系统设置 → 隐私与安全性 → 完整磁盘访问权限 → 把你的终端 App 加进去，" "  System Settings → Privacy & Security → Full Disk Access → add your terminal app,"
+      sayL "  然后**完全退出终端再打开**（改完权限不重启进程不生效）。" "  then **quit the terminal completely and reopen it** (a permission change doesn't apply until the process restarts)."
       say ""
-      say "  ${C_D}Voice Memos 的容器受 TCC 保护，而授权是按 App 给的——${C_0}"
-      say "  ${C_D}访达和「语音备忘录」App 能看见，不代表终端能看见。${C_0}"
+      sayL "  ${C_D}Voice Memos 的容器受 TCC 保护，而授权是按 App 给的——${C_0}" "  ${C_D}The Voice Memos container is protected by TCC, and permission is granted per app:${C_0}"
+      sayL "  ${C_D}访达和「语音备忘录」App 能看见，不代表终端能看见。${C_0}" "  ${C_D}Finder and the Voice Memos app being able to see it doesn't mean the terminal can.${C_0}"
       exit 1 ;;
     "OK 0")
-      die "${VM_DIR} 里确实一条录音都没有。" ;;
+      dieL "${VM_DIR} 里确实一条录音都没有。" "There really are no recordings in ${VM_DIR}." ;;
     ERR*)
-      die "读不了 ${VM_DIR}" ;;
+      dieL "读不了 ${VM_DIR}" "Cannot read ${VM_DIR}" ;;
   esac
   list=$(phone_files)
-  [ -n "$list" ] || die "${VM_DIR} 里一条录音都没有。"
+  [ -n "$list" ] || dieL "${VM_DIR} 里一条录音都没有。" "No recordings in ${VM_DIR}."
 
   pick="${1:-}"
   if [ -z "$pick" ]; then
-    say "iPhone 语音备忘录（最近 10 条）"
+    sayL "iPhone 语音备忘录（最近 10 条）" "iPhone Voice Memos (latest 10)"
     say ""
     i=0
     printf '%s\n' "$list" | head -10 | while IFS= read -r f; do
@@ -976,25 +993,25 @@ phone() {
       d=$(ffprobe -v quiet -show_entries format=duration -of csv=p=0 "$f" 2>/dev/null | cut -d. -f1)
       d=${d:-0}
       # .qta 是空间音频，里面有一条 ffmpeg 解不了的 apac 轨；标出来免得看着奇怪。
-      tag=""; case "$f" in *.qta) tag=" ${C_D}空间音频${C_0}" ;; esac
-      printf '  %s%2d%s  %s  %3d 分 %02d 秒  %6s%s\n' \
+      tag=""; case "$f" in *.qta) tag=" ${C_D}$(L '空间音频' 'spatial audio')${C_0}" ;; esac
+      printf "$(L '  %s%2d%s  %s  %3d 分 %02d 秒  %6s%s\n' '  %s%2d%s  %s  %3d min %02d s  %6s%s\n')" \
         "$C_G" "$i" "$C_0" "$(phone_stamp "$f")" \
         "$((d / 60))" "$((d % 60))" "$(du -h "$f" | cut -f1 | tr -d ' ')" "$tag"
     done
     say ""
-    say "  转写最新那条：${C_G}rex phone 1${C_0}"
+    sayL "  转写最新那条：${C_G}rex phone 1${C_0}" "  Transcribe the latest: ${C_G}rex phone 1${C_0}"
     return 0
   fi
 
   case "$pick" in
     "$VM_DIR"/*)
       # 录音台（rex app）按文件导入：序号会随新录音变，路径不会
-      [ -f "$pick" ] || die "没有这条语音备忘录：$pick"
+      [ -f "$pick" ] || dieL "没有这条语音备忘录：$pick" "No such voice memo: $pick"
       src="$pick" ;;
-    ''|*[!0-9]*) die "要一个序号，比如 rex phone 1（先跑 rex phone 看列表）" ;;
+    ''|*[!0-9]*) dieL "要一个序号，比如 rex phone 1（先跑 rex phone 看列表）" "Expected a number, e.g. rex phone 1 (run rex phone first to see the list)" ;;
     *)
       src=$(printf '%s\n' "$list" | sed -n "${pick}p")
-      [ -n "$src" ] || die "没有第 $pick 条。跑 rex phone 看看有几条。" ;;
+      [ -n "$src" ] || dieL "没有第 $pick 条。跑 rex phone 看看有几条。" "There is no memo $pick. Run rex phone to see how many there are." ;;
   esac
 
   need whisper-cli "brew install whisper-cpp"
@@ -1006,23 +1023,23 @@ phone() {
   out=$(ls -1 "$REX_DIR/${stamp}_phone"*.m4a "$REX_DIR/${stamp}_phone"*.wav 2>/dev/null | head -1)
 
   if [ -n "$out" ]; then
-    say "${C_D}已经取过了：$out${C_0}"
+    sayL "${C_D}已经取过了：$out${C_0}" "${C_D}Already imported: $out${C_0}"
   else
     out="$REX_DIR/${stamp}_phone.m4a"
     # 拷成单声道 AAC 再转写，不直接拿原件：一小时空间音频是 287 MB，
     # 转完 30 MB 上下；而且备忘录容器归 Voice Memos 管，删了备忘录原件就没了。
     # -map 0:a:0 显式选第一条音轨：.qta 里还有一条 apac 轨，别赌 ffmpeg 的默认选流。
-    say "${C_D}取出来 → $out${C_0}"
+    sayL "${C_D}取出来 → $out${C_0}" "${C_D}Extracting → $out${C_0}"
     ffmpeg -hide_banner -loglevel error -i "$src" -map 0:a:0 \
            -ac 1 -ar 48000 -c:a aac -b:a 96k -y "$out" \
-      || { rm -f "$out"; die "取不出音频。文件可能还没从 iCloud 下完，去手机或访达里打开一次再来。"; }
+      || { rm -f "$out"; dieL "取不出音频。文件可能还没从 iCloud 下完，去手机或访达里打开一次再来。" "Cannot extract the audio. The file may not have finished downloading from iCloud; open it once on the phone or in Finder and try again."; }
   fi
 
   report_file "$out"
   say ""
   transcribe_one "$out"
   say ""
-  say "  ${C_D}认错词：whisper-prompt.txt（偏置）→ whisper-fix.txt（确定性替换），放在 ~/.config/rex/（没有就从 ${TOOLS_DIR}/ 拷模板过去）${C_0}"
+  sayL "  ${C_D}认错词：whisper-prompt.txt（偏置）→ whisper-fix.txt（确定性替换），放在 ~/.config/rex/（没有就从 ${TOOLS_DIR}/ 拷模板过去）${C_0}" "  ${C_D}Misrecognized words: whisper-prompt.txt (bias) → whisper-fix.txt (deterministic replacements), both in ~/.config/rex/ (if missing, copy the templates from ${TOOLS_DIR}/)${C_0}"
 }
 
 # ------------------------------------------------------------------ 丢进来的文件
@@ -1090,25 +1107,25 @@ PY
 in_cmd() {
   rows=$(drop_scan)
   if [ -z "$rows" ]; then
-    say "$(printf '%s' "$DROP_DIRS" | tr ':' ' ') 里没有可转的音视频文件。"
-    say "  ${C_D}AirDrop 过来的东西默认落在 ~/Downloads。${C_0}"
+    sayL "$(printf '%s' "$DROP_DIRS" | tr ':' ' ') 里没有可转的音视频文件。" "No audio or video files to transcribe in $(printf '%s' "$DROP_DIRS" | tr ':' ' ')."
+    sayL "  ${C_D}AirDrop 过来的东西默认落在 ~/Downloads。${C_0}" "  ${C_D}AirDrop puts files in ~/Downloads by default.${C_0}"
     return 0
   fi
 
   if [ "$#" -eq 0 ]; then
-    say "可以转的文件（改 REX_DROP 换扫描目录）"
+    sayL "可以转的文件（改 REX_DROP 换扫描目录）" "Files that can be transcribed (set REX_DROP to scan other folders)"
     say ""
     printf '%s\n' "$rows" | while IFS=$'\t' read -r i p target dur size done; do
       # 颜色码要放在 %s 里、数字单独用 %2d 补齐——把色码算进 %2s 的宽度，
       # 那一列就会歪掉。
       c="$C_G"; tag=""
-      [ "$done" = "1" ] && { c="$C_D"; tag="  ${C_D}已转过${C_0}"; }
-      printf '  %s%2d%s  %4d 分  %6s  %s%s\n' "$c" "$i" "$C_0" \
+      [ "$done" = "1" ] && { c="$C_D"; tag="  ${C_D}$(L '已转过' 'already transcribed')${C_0}"; }
+      printf "$(L '  %s%2d%s  %4d 分  %6s  %s%s\n' '  %s%2d%s  %4d min  %6s  %s%s\n')" "$c" "$i" "$C_0" \
         "$((dur / 60))" "$(du -h "$p" | cut -f1 | tr -d ' ')" "$(basename "$p")" "$tag"
     done
     say ""
-    say "  转一个：${C_G}rex in 1${C_0}    转多个：rex in 1 3    全转：${C_G}rex in all${C_0}"
-    say "  ${C_D}原件只读不动，只往 $REX_DIR 拷一份。约 8 倍速，先看上面的分钟数估时间。${C_0}"
+    sayL "  转一个：${C_G}rex in 1${C_0}    转多个：rex in 1 3    全转：${C_G}rex in all${C_0}" "  One: ${C_G}rex in 1${C_0}    Several: rex in 1 3    All: ${C_G}rex in all${C_0}"
+    sayL "  ${C_D}原件只读不动，只往 $REX_DIR 拷一份。约 8 倍速，先看上面的分钟数估时间。${C_0}" "  ${C_D}Originals are only read, never changed; a copy goes into $REX_DIR. Runs at about 8x speed; estimate the time from the minutes above.${C_0}"
     return 0
   fi
 
@@ -1119,13 +1136,13 @@ in_cmd() {
   picks="$*"
   if [ "$picks" = "all" ]; then
     picks=$(printf '%s\n' "$rows" | awk -F'\t' '$6=="0" { print $1 }')
-    [ -n "$picks" ] || { say "全都转过了。"; return 0; }
+    [ -n "$picks" ] || { sayL "全都转过了。" "All of them are already transcribed."; return 0; }
   fi
 
   for n in $picks; do
-    case "$n" in ''|*[!0-9]*) warn "跳过「${n}」：要序号，比如 rex in 1"; continue ;; esac
+    case "$n" in ''|*[!0-9]*) warnL "跳过「${n}」：要序号，比如 rex in 1" "Skipping \"${n}\": expected a number, e.g. rex in 1"; continue ;; esac
     line=$(printf '%s\n' "$rows" | awk -F'\t' -v k="$n" '$1==k')
-    [ -n "$line" ] || { warn "没有第 $n 个"; continue; }
+    [ -n "$line" ] || { warnL "没有第 $n 个" "There is no item $n"; continue; }
 
     src=$(printf '%s' "$line" | cut -f2)
     target=$(printf '%s' "$line" | cut -f3)
@@ -1133,7 +1150,7 @@ in_cmd() {
 
     have=$(ls -1 "$REX_DIR/$target"*.m4a 2>/dev/null | head -1)
     if [ -n "$have" ]; then
-      say "${C_D}已经导过：$have${C_0}"
+      sayL "${C_D}已经导过：$have${C_0}" "${C_D}Already imported: $have${C_0}"
       out="$have"
     else
       say ""
@@ -1141,10 +1158,10 @@ in_cmd() {
       # 先试 -c:a copy：AAC 直接搬进 mp4 容器是无损且瞬时的，一个 130 分钟的
       # 文件不用重编码。源不是 AAC（wav / flac / opus）时 copy 会失败，再退回重编。
       if ! ffmpeg -hide_banner -loglevel error -i "$src" -map 0:a:0 -c:a copy -y "$out" 2>/dev/null; then
-        say "  ${C_D}容器不兼容，重编成 AAC…${C_0}"
+        sayL "  ${C_D}容器不兼容，重编成 AAC…${C_0}" "  ${C_D}Incompatible container; re-encoding to AAC…${C_0}"
         ffmpeg -hide_banner -loglevel error -i "$src" -map 0:a:0 \
                -ac 1 -ar 48000 -c:a aac -b:a 96k -y "$out" \
-          || { rm -f "$out"; warn "取不出音频：$src"; continue; }
+          || { rm -f "$out"; warnL "取不出音频：$src" "Cannot extract audio: $src"; continue; }
       fi
     fi
 
@@ -1153,7 +1170,7 @@ in_cmd() {
     transcribe_one "$out"
   done
   say ""
-  say "  ${C_D}原件仍在原处，一个字节没动。${C_0}"
+  sayL "  ${C_D}原件仍在原处，一个字节没动。${C_0}" "  ${C_D}The originals are still where they were, not a byte changed.${C_0}"
 }
 
 # ------------------------------------------------------------------ 自检
@@ -1186,34 +1203,34 @@ tone_peak() {
 # 收到了就把它设成录系统声音的默认（见 sys_path）。
 check_sys_tap() {
   ensure_cap
-  say "${C_D}问系统音频接口的权限……（第一次会弹「rex 录音采集」想录制系统音频的提示，点允许）${C_0}"
+  sayL "${C_D}问系统音频接口的权限……（第一次会弹「rex 录音采集」想录制系统音频的提示，点允许）${C_0}" "${C_D}Requesting permission for the system audio tap… (the first time, macOS asks whether \"rex 录音采集\" may record system audio: click Allow)${C_0}"
   if ! "$CAP" --system --info --request >/dev/null; then
     rm -f "$SYS_CFG"
-    warn "✗ 系统音频接口用不了（原因在上面）。在那之前录系统声音照旧走 BlackHole 那条路。"
+    warnL "✗ 系统音频接口用不了（原因在上面）。在那之前录系统声音照旧走 BlackHole 那条路。" "✗ The system audio tap can't be used (reason above). Until it works, system audio keeps recording over the BlackHole route."
     return 1
   fi
-  say "放一声测试音，同时用系统音频接口录 3 秒……"
+  sayL "放一声测试音，同时用系统音频接口录 3 秒……" "Playing a test tone while recording 3 s through the system audio tap…"
   peak=$(tone_peak --system) || peak=""
   if [ -n "$peak" ] && awk -v p="$peak" 'BEGIN { exit !(p > -50) }'; then
     # 接口只在有程序放声音时才出数据（audiocap.swift 文件头）；audiocap 自己写静音顶着。这里验证一下：
     # 什么都不放录 2 秒，必须持续出数据，否则开录时对方还没说话就起不来
-    say "再录 2 秒什么都不放的：接口安静时也得持续出数据……"
+    sayL "再录 2 秒什么都不放的：接口安静时也得持续出数据……" "Recording 2 more seconds with nothing playing: the tap must keep delivering data while it's quiet…"
     n=$("$CAP" --system --seconds 2 2>>"$LOG" | wc -c | tr -d ' ')
     if [ "${n:-0}" -lt 100000 ]; then
       rm -f "$SYS_CFG"
-      warn "✗ 什么都不放时系统音频接口不出数据（2 秒只收到 ${n:-0} 字节）。"
-      say "  audiocap 往扬声器写静音那一手没生效，看 ${LOG} 里它的输出。在那之前录系统声音照旧走 BlackHole。"
+      warnL "✗ 什么都不放时系统音频接口不出数据（2 秒只收到 ${n:-0} 字节）。" "✗ The system audio tap delivers no data while nothing is playing (only ${n:-0} bytes in 2 s)."
+      sayL "  audiocap 往扬声器写静音那一手没生效，看 ${LOG} 里它的输出。在那之前录系统声音照旧走 BlackHole。" "  audiocap's trick of writing silence to the speakers didn't work; check its output in ${LOG}. Until it works, system audio keeps recording over BlackHole."
       return 1
     fi
     mkdir -p "$(dirname "$SYS_CFG")"; echo tap > "$SYS_CFG"
-    say "${C_G}✓ 系统音频接口收到了测试音（峰值 ${peak} dB）。${C_0}"
-    say "  以后录系统声音都走它：不改输出设备，AirPods 怎么自动切换都不断，音量键照常用。"
+    sayL "${C_G}✓ 系统音频接口收到了测试音（峰值 ${peak} dB）。${C_0}" "${C_G}✓ The system audio tap received the test tone (peak ${peak} dB).${C_0}"
+    sayL "  以后录系统声音都走它：不改输出设备，AirPods 怎么自动切换都不断，音量键照常用。" "  From now on system audio is recorded through it: the output device stays as is, AirPods auto-switching never breaks it, and the volume keys keep working."
     return 0
   fi
   rm -f "$SYS_CFG"
-  warn "✗ 权限是有的，但系统音频接口没收到测试音（峰值 ${peak:-?} dB）。"
-  say "  刚授权完音频服务有时要缓一下：再跑一次 rex check sys。还不行就看 ${LOG} 里 audiocap 的输出。"
-  say "  在那之前，录系统声音照旧走 BlackHole 那条路。"
+  warnL "✗ 权限是有的，但系统音频接口没收到测试音（峰值 ${peak:-?} dB）。" "✗ Permission is granted, but the system audio tap did not receive the test tone (peak ${peak:-?} dB)."
+  sayL "  刚授权完音频服务有时要缓一下：再跑一次 rex check sys。还不行就看 ${LOG} 里 audiocap 的输出。" "  Right after permission is granted, the audio service sometimes needs a moment: run rex check sys again. If it still fails, check audiocap's output in ${LOG}."
+  sayL "  在那之前，录系统声音照旧走 BlackHole 那条路。" "  Until then, system audio keeps recording over the BlackHole route."
   return 1
 }
 
@@ -1229,7 +1246,7 @@ check() {
       # 第一次会弹麦克风授权框，audiocap 等用户点；没给就在这儿停，不录一段全零出来
       info=$("$CAP" "$pat" --info) || exit 1
       r=$(printf '%s' "$info" | awk '{print $1}'); c=$(printf '%s' "$info" | awk '{print $2}')
-      say "${C_D}录 3 秒试试：麦克风 $(printf '%s' "$info" | cut -d' ' -f3-)（说句话）${C_0}"
+      sayL "${C_D}录 3 秒试试：麦克风 $(printf '%s' "$info" | cut -d' ' -f3-)（说句话）${C_0}" "${C_D}Recording 3 s as a test: microphone $(printf '%s' "$info" | cut -d' ' -f3-) (say something)${C_0}"
       t="${TMPDIR:-/tmp}/rex-check-$$.f32"
       "$CAP" "$pat" --seconds 3 > "$t" 2>>"$LOG"
       peak=$(ffmpeg -hide_banner -nostats -f f32le -ar "$r" -ac "$c" -i "$t" -af volumedetect -f null - 2>&1 \
@@ -1237,29 +1254,29 @@ check() {
       rm -f "$t" ;;
     sys)
       check_sys_tap && return 0
-      say ""; say "${C_D}再测 BlackHole 那条老路：建直通、放测试音、从 BlackHole 录 3 秒${C_0}"
+      say ""; sayL "${C_D}再测 BlackHole 那条老路：建直通、放测试音、从 BlackHole 录 3 秒${C_0}" "${C_D}Now testing the old BlackHole route: set up the passthrough, play a test tone, record 3 s from BlackHole${C_0}"
       # 要建直通，否则系统声音根本不进 BlackHole，测出来必然是静音
       setup_passthru
       peak=$(tone_peak BlackHole) || peak=""
       teardown_passthru "$PT_RESTORE" "$PT_UID" ;;
-    *) die "rex check mic  或  rex check sys" ;;
+    *) dieL "rex check mic  或  rex check sys" "rex check mic  or  rex check sys" ;;
   esac
 
   if [ -z "$peak" ] || awk -v p="${peak:--91}" 'BEGIN { exit !(p <= -90) }'; then
-    printf '%s✗ 峰值 %s dB —— 精确的数字静音，这条路上没有数据。%s\n' "$C_R" "${peak:-?}" "$C_0"
+    printf "$(L '%s✗ 峰值 %s dB —— 精确的数字静音，这条路上没有数据。%s\n' '%s✗ Peak %s dB: exact digital silence, no data on this route.%s\n')" "$C_R" "${peak:-?}" "$C_0"
     if [ "$what" = mic ]; then
-      say "  1. 笔记本合着盖？内建麦克风在硬件上是断开的，开盖再试。"
-      say "  2. 权限：系统设置 → 隐私与安全性 → 麦克风 → 「rex 录音采集」要开着。"
+      sayL "  1. 笔记本合着盖？内建麦克风在硬件上是断开的，开盖再试。" "  1. Laptop lid closed? The built-in microphone is disconnected in hardware; open the lid and try again."
+      sayL "  2. 权限：系统设置 → 隐私与安全性 → 麦克风 → 「rex 录音采集」要开着。" "  2. Permission: System Settings → Privacy & Security → Microphone → \"rex 录音采集\" must be turned on."
     else
-      say "  1. 权限：系统设置 → 隐私与安全性 → 麦克风 → 「rex 录音采集」要开着"
-      say "     （从 BlackHole 抓声音在系统看来也算「用麦克风」）。"
-      say "  2. BlackHole 没装或没加载：audiocap --list 里该有「BlackHole 2ch」。"
+      sayL "  1. 权限：系统设置 → 隐私与安全性 → 麦克风 → 「rex 录音采集」要开着" "  1. Permission: System Settings → Privacy & Security → Microphone → \"rex 录音采集\" must be turned on"
+      sayL "     （从 BlackHole 抓声音在系统看来也算「用麦克风」）。" "     (to macOS, capturing from BlackHole counts as \"using the microphone\")."
+      sayL "  2. BlackHole 没装或没加载：audiocap --list 里该有「BlackHole 2ch」。" "  2. BlackHole is not installed or not loaded: audiocap --list should show \"BlackHole 2ch\"."
     fi
-    say "  3. 音频链路坏了（蓝牙设备掉线之后常见）。重启音频服务："
-    say "     ${C_G}sudo killall coreaudiod${C_0}   ${C_D}（要输密码，声音会断一两秒）${C_0}"
+    sayL "  3. 音频链路坏了（蓝牙设备掉线之后常见）。重启音频服务：" "  3. The audio chain is broken (common after a Bluetooth device drops). Restart the audio service:"
+    sayL "     ${C_G}sudo killall coreaudiod${C_0}   ${C_D}（要输密码，声音会断一两秒）${C_0}" "     ${C_G}sudo killall coreaudiod${C_0}   ${C_D}(asks for your password; sound cuts out for a second or two)${C_0}"
     return 1
   fi
-  say "${C_G}✓ 峰值 ${peak} dB，在收数据。${C_0}"
+  sayL "${C_G}✓ 峰值 ${peak} dB，在收数据。${C_0}" "${C_G}✓ Peak ${peak} dB; data is coming in.${C_0}"
 }
 
 # ------------------------------------------------------------------ 转写
@@ -1268,16 +1285,16 @@ check() {
 fetch_model() {
   path="$1"; url="$2"; what="$3"
   [ -f "$path" ] && return 0
-  say "第一次转写，要先下${what}："
+  sayL "第一次转写，要先下${what}：" "First transcription: downloading ${what}:"
   say "  ${C_D}$path${C_0}"
   mkdir -p "$(dirname "$path")"
-  curl -fL --progress-bar -o "$path.part" "$url" || { rm -f "$path.part"; die "$what 下载失败"; }
+  curl -fL --progress-bar -o "$path.part" "$url" || { rm -f "$path.part"; dieL "$what 下载失败" "Failed to download $what"; }
   mv "$path.part" "$path"
 }
 
 ensure_model() {
-  fetch_model "$WMODEL" "$WURL" "识别模型（约 550 MB，只下这一次）"
-  [ -n "${NOVAD:-}" ] || fetch_model "$VMODEL" "$VURL" "VAD 模型（864 KB）"
+  fetch_model "$WMODEL" "$WURL" "$(L '识别模型（约 550 MB，只下这一次）' 'the speech model (about 550 MB, downloaded only once)')"
+  [ -n "${NOVAD:-}" ] || fetch_model "$VMODEL" "$VURL" "$(L 'VAD 模型（864 KB）' 'the VAD model (864 KB)')"
 }
 
 # 转写后处理：先修无效字节，再做确定性替换，最后报字数。
@@ -1294,6 +1311,13 @@ ensure_model() {
 postprocess() {
   python3 - "$WFIX" "$1.txt" "$1.srt" <<'PY'
 import io, os, sys
+
+EN = os.environ.get("REX_LANG") == "en"
+
+
+def L(zh, en):
+    return en if EN else zh
+
 
 rules = []
 if os.path.exists(sys.argv[1]):
@@ -1325,9 +1349,10 @@ for path in sys.argv[2:]:
         io.open(path, 'w', encoding='utf-8').write(out)
 
 for (a, b), n in counted.items():
-    print("    替换 %d 处：%s → %s" % (n, a, b))
+    print(L("    替换 %d 处：%s → %s", "    replaced %d time(s): %s → %s") % (n, a, b))
 if bad:
-    print("    ! 有 %d 处无效字节（whisper 在分段边界上吐了半个字），已标成 �" % bad)
+    print(L("    ! 有 %d 处无效字节（whisper 在分段边界上吐了半个字），已标成 �",
+            "    ! %d invalid byte(s) (whisper emitted half a character at a segment boundary), marked as �") % bad)
 print("CHARS %d" % chars)
 PY
 }
@@ -1366,7 +1391,7 @@ rename_by_keywords() {
   fi
 
   kw=$(python3 "$TOOLS_DIR/keywords.py" "$base.txt" --glossary "$WPROMPT" 2>/dev/null)
-  [ -n "$kw" ] || { say "  ${C_D}抽不出关键词（稿子太短或没有重复出现的词），保持原名${C_0}"; return 0; }
+  [ -n "$kw" ] || { sayL "  ${C_D}抽不出关键词（稿子太短或没有重复出现的词），保持原名${C_0}" "  ${C_D}No keywords found (the transcript is too short or has no repeated words); keeping the original name${C_0}"; return 0; }
 
   new="${base}_${kw}"
   [ "$new" = "$base" ] && return 0
@@ -1381,10 +1406,10 @@ rename_by_keywords() {
       for a in "$audio" "$audio2"; do
         mv -f "$a" "${a%.*}_${kw}.${a##*.}"
       done
-      say "  ${C_D}两个音频一起改了名${C_0}"
+      sayL "  ${C_D}两个音频一起改了名${C_0}" "  ${C_D}Both audio files were renamed too${C_0}"
     else
       ext="${audio##*.}"
-      mv -f "$audio" "${new}.${ext}" && say "  ${C_D}音频一起改了名${C_0}"
+      mv -f "$audio" "${new}.${ext}" && sayL "  ${C_D}音频一起改了名${C_0}" "  ${C_D}The audio file was renamed too${C_0}"
     fi
   fi
   NEWBASE="$new"
@@ -1451,7 +1476,7 @@ to16k() {   # to16k 源文件 流 输出.wav
   got=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$3" 2>/dev/null)
   # 少 1% 以上才算有洞：AAC 编码器的填充只有零点几秒
   if awk -v w="$want" -v g="$got" 'BEGIN { exit !(w + 0 > 0 && g + 0 > 0 && g < w * 0.99) }'; then
-    say "  ${C_D}采集时丢过样本（解出 ${got%.*} 秒，标称 ${want%.*} 秒），按时间戳补上空隙再转${C_0}" >&2
+    sayL "  ${C_D}采集时丢过样本（解出 ${got%.*} 秒，标称 ${want%.*} 秒），按时间戳补上空隙再转${C_0}" "  ${C_D}Samples were dropped during capture (decoded ${got%.*} s, nominal ${want%.*} s); filling the gaps by timestamp before transcribing${C_0}" >&2
     ffmpeg -hide_banner -loglevel error -y -i "$1" -map "$2" \
         -af aresample=async=1:min_hard_comp=0.001:first_pts=0 \
         -ar 16000 -ac 1 -c:a pcm_s16le "$3"
@@ -1479,16 +1504,16 @@ transcribe_speakers() {
   for side in a b; do
     if [ "$side" = a ]; then src="$fa"; map="$ma"; who="$NAME_A"
     else src="$fb"; map="$mb"; who="$NAME_B"; fi
-    say "  ${C_D}── ${who}那一轨 ──${C_0}"
+    sayL "  ${C_D}── ${who}那一轨 ──${C_0}" "  ${C_D}── track: ${who} ──${C_0}"
     to16k "$src" "$map" "$work/$side.wav" \
-      || { warn "  转 16k 单声道失败：${src}（${map}）"; rm -rf "$work"; return 1; }
+      || { warnL "  转 16k 单声道失败：${src}（${map}）" "  Failed to convert to 16k mono: ${src} (${map})"; rm -rf "$work"; return 1; }
     python3 "$TOOLS_DIR/whisper_run.py" \
         --model "$WMODEL" --audio "$work/$side.wav" --out "$work/$side" \
         --lang "${LANG_OPT:-auto}" ${wargs[@]+"${wargs[@]}"}
     wrc=$?
     # 崩了要说是崩了。不说的话这一轨按空的处理，下游会报成「VAD 没找到人声」——
     # 把故障说成了安静。
-    [ "$wrc" -eq 0 ] || warn "  whisper 在${who}那一轨上出错（退出码 ${wrc}），这一轨按空的处理"
+    [ "$wrc" -eq 0 ] || warnL "  whisper 在${who}那一轨上出错（退出码 ${wrc}），这一轨按空的处理" "  whisper failed on the ${who} track (exit code ${wrc}); treating this track as empty"
     rm -f "$work/$side.wav"
     [ -f "$work/$side.srt" ] || : > "$work/$side.srt"
     [ -f "$work/$side.txt" ] || : > "$work/$side.txt"
@@ -1501,7 +1526,7 @@ transcribe_speakers() {
   rc=$?
   rm -rf "$work"
   printf '%s\n' "$info" | grep -v '^CHARS ' || true
-  [ "$rc" -eq 0 ] || { warn "  合成对话稿失败（speakers.py 退出码 ${rc}）"; return 1; }
+  [ "$rc" -eq 0 ] || { warnL "  合成对话稿失败（speakers.py 退出码 ${rc}）" "  Failed to build the dialogue transcript (speakers.py exit code ${rc})"; return 1; }
   SPK_CHARS=$(printf '%s\n' "$info" | awk '/^CHARS /{ print $2 }')
   SPK_CHARS=${SPK_CHARS:-0}
   return 0
@@ -1511,43 +1536,43 @@ transcribe_speakers() {
 finish_speakers() {
   out="$1"; fa="$2"; fb="${3:-}"
   if [ "${SPK_CHARS:-0}" -eq 0 ]; then
-    say "  ${C_Y}○${C_0} 两轨都没转出字 —— VAD 没找到人声"
+    sayL "  ${C_Y}○${C_0} 两轨都没转出字 —— VAD 没找到人声" "  ${C_Y}○${C_0} No text from either track: VAD found no voice"
     return 0
   fi
   rename_by_keywords "$out" "$fa" "$fb"
-  say "  ${C_G}✓${C_0} $NEWBASE.txt   ${C_D}${SPK_CHARS} 字 · 对话稿${C_0}"
-  say "     ${C_D}$(basename "$NEWBASE").srt（带时间轴，每条前面写着是谁）${C_0}"
+  sayL "  ${C_G}✓${C_0} $NEWBASE.txt   ${C_D}${SPK_CHARS} 字 · 对话稿${C_0}" "  ${C_G}✓${C_0} $NEWBASE.txt   ${C_D}${SPK_CHARS} chars · dialogue transcript${C_0}"
+  sayL "     ${C_D}$(basename "$NEWBASE").srt（带时间轴，每条前面写着是谁）${C_0}" "     ${C_D}$(basename "$NEWBASE").srt (with timestamps; each entry starts with who is speaking)${C_0}"
 }
 
 # --split 那一对：合成一份，以 X_both 为名（去掉 -mic / -sys）。
 transcribe_pair() {
   pb=$(basename "$1")
   pout="$(dirname "$1")/${pb%%_both-mic*}_both"
-  say "${C_D}转写 $(basename "$1") + $(basename "$2") …（--split 的一对，按说话人合成一份）${C_0}"
+  sayL "${C_D}转写 $(basename "$1") + $(basename "$2") …（--split 的一对，按说话人合成一份）${C_0}" "${C_D}Transcribing $(basename "$1") + $(basename "$2") … (a --split pair, merged into one by speaker)${C_0}"
   transcribe_speakers "$pout" "$1" 0:a:0 "$2" 0:a:0 || return 1
   finish_speakers "$pout" "$1" "$2"
 }
 
 transcribe_one() {
   f="$1"
-  [ -f "$f" ] || { warn "没有这个文件：$f"; return 1; }
+  [ -f "$f" ] || { warnL "没有这个文件：$f" "No such file: $f"; return 1; }
 
   out="${f%.*}"
 
   # rex both 录的文件里存着两路原始信号：按说话人出对话稿，不转混音那条
   st=$(speaker_tracks "$f")
   if [ -n "$st" ]; then
-    say "${C_D}转写 $(basename "$f") …（分轨：${NAME_A} = 麦克风，${NAME_B} = 系统声音）${C_0}"
+    sayL "${C_D}转写 $(basename "$f") …（分轨：${NAME_A} = 麦克风，${NAME_B} = 系统声音）${C_0}" "${C_D}Transcribing $(basename "$f") … (separate tracks: ${NAME_A} = microphone, ${NAME_B} = system audio)${C_0}"
     transcribe_speakers "$out" "$f" "0:${st%% *}" "$f" "0:${st##* }" || return 1
     finish_speakers "$out" "$f"
     return 0
   fi
 
   tmp="${TMPDIR:-/tmp}/rex-whisper-$$-$(basename "$out").wav"
-  to16k "$f" 0:a:0 "$tmp" || { warn "转 16k 单声道失败：$f"; return 1; }
+  to16k "$f" 0:a:0 "$tmp" || { warnL "转 16k 单声道失败：$f" "Failed to convert to 16k mono: $f"; return 1; }
   whisper_args
 
-  say "${C_D}转写 $(basename "$f") …${C_0}"
+  sayL "${C_D}转写 $(basename "$f") …${C_0}" "${C_D}Transcribing $(basename "$f") …${C_0}"
   # 不直接调 whisper-cli，走 whisper_run.py。理由见那个文件的头部注释：
   # whisper 只在文件开头认一次语言，中英混说的录音后半段会被按第一种语言硬解，
   # 而且不报错——它会掉进重复陷阱，把同一句话打印几百遍。
@@ -1559,7 +1584,7 @@ transcribe_one() {
 
   if [ ! -f "$out.txt" ]; then
     rm -f "$tmp"
-    warn "whisper 没有写出 $out.txt（退出码 ${rc}）"
+    warnL "whisper 没有写出 $out.txt（退出码 ${rc}）" "whisper did not write $out.txt (exit code ${rc})"
     return 1
   fi
   # 字数由 postprocess 直接给：wc -m 数的是字符还是字节要看 locale，
@@ -1571,15 +1596,15 @@ transcribe_one() {
   if [ "$n" -eq 0 ]; then
     rm -f "$tmp"
     # 空不是失败，是 VAD 判定这一轨没人说话。明说出来，别让人对着 0 字发呆。
-    say "  ${C_Y}○${C_0} $(basename "$out").txt 是空的 —— 这一轨 VAD 没找到人声"
+    sayL "  ${C_Y}○${C_0} $(basename "$out").txt 是空的 —— 这一轨 VAD 没找到人声" "  ${C_Y}○${C_0} $(basename "$out").txt is empty: VAD found no voice on this track"
     return 0
   fi
   # --who：按声纹分人，稿子换成对话稿。要用上面那个 16k wav，所以删 tmp 放在这之后。
   if [ -n "${WHO:-}" ]; then diarize_files "$f" "$out" "$tmp" || true; fi
   rm -f "$tmp"
   rename_by_keywords "$out" "$f"
-  say "  ${C_G}✓${C_0} $NEWBASE.txt   ${C_D}$n 字${C_0}"
-  say "     ${C_D}$(basename "$NEWBASE").srt（带时间轴）${C_0}"
+  sayL "  ${C_G}✓${C_0} $NEWBASE.txt   ${C_D}$n 字${C_0}" "  ${C_G}✓${C_0} $NEWBASE.txt   ${C_D}$n chars${C_0}"
+  sayL "     ${C_D}$(basename "$NEWBASE").srt（带时间轴）${C_0}" "     ${C_D}$(basename "$NEWBASE").srt (with timestamps)${C_0}"
   return 0
 }
 
@@ -1607,7 +1632,7 @@ diar_get() {   # diar_get 网址 存成
 ensure_diar() {
   diar_ready && return 0
   arch=arm64; [ "$(uname -m)" = arm64 ] || arch=universal2
-  say "第一次按声纹分人，要先下 sherpa-onnx 和两个模型（约 50 MB，只下这一次）："
+  sayL "第一次按声纹分人，要先下 sherpa-onnx 和两个模型（约 50 MB，只下这一次）：" "First speaker diarization: downloading sherpa-onnx and two models (about 50 MB, only once):"
   say "  ${C_D}$DIAR_DIR${C_0}"
   mkdir -p "$DIAR_DIR"
   ( cd "$DIAR_DIR" \
@@ -1616,8 +1641,8 @@ ensure_diar() {
     && diar_get "$DIAR_URL/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2" seg.tar.bz2 \
     && tar -xjf seg.tar.bz2 && rm -f seg.tar.bz2 \
     && diar_get "$DIAR_URL/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx" campplus_zh_en.onnx ) \
-    || { warn "  下载 sherpa-onnx 失败"; return 1; }
-  diar_ready || { warn "  sherpa-onnx 下下来了，但找不到程序或模型（${DIAR_DIR}）"; return 1; }
+    || { warnL "  下载 sherpa-onnx 失败" "  Failed to download sherpa-onnx"; return 1; }
+  diar_ready || { warnL "  sherpa-onnx 下下来了，但找不到程序或模型（${DIAR_DIR}）" "  sherpa-onnx was downloaded, but the program or the models can't be found (${DIAR_DIR})"; return 1; }
 }
 
 # 已经有 .srt 的录音：按声纹分人，把 .txt / .srt 换成对话稿。wav 是 16k 单声道。
@@ -1628,13 +1653,13 @@ diarize_files() {
   case "${WHO:-auto}" in auto) ;; *) dargs+=( --speakers "$WHO" ) ;; esac
   # 混成一轨的老 rex both：两边分别是本机麦克风和通话那头，频谱能对上「我 / 对方」
   case "$(basename "$df")" in *_both.*|*_both_*) dargs+=( --call "$df" ) ;; esac
-  say "  ${C_D}按声纹分人…${C_0}"
+  sayL "  ${C_D}按声纹分人…${C_0}" "  ${C_D}Speaker diarization…${C_0}"
   dinfo=$(python3 "$TOOLS_DIR/diarize.py" "${dargs[@]}")
   drc=$?
   printf '%s\n' "$dinfo" | grep -v '^CHARS ' || true
   case "$drc" in
     0|5) ;;    # 5 = 只听出一个人，稿子保持原样，不算失败
-    *) warn "  分人没成功（diarize.py 退出码 ${drc}），稿子保持原样" ;;
+    *) warnL "  分人没成功（diarize.py 退出码 ${drc}），稿子保持原样" "  Speaker diarization failed (diarize.py exit code ${drc}); transcript left unchanged" ;;
   esac
   return "$drc"
 }
@@ -1649,27 +1674,27 @@ who_cmd() {
   [ -n "${WHO:-}" ] || WHO=auto
   if [ -z "$wf" ]; then
     wf=$(ls -1t "$REX_DIR"/*.m4a "$REX_DIR"/*.wav 2>/dev/null | head -1)
-    [ -n "$wf" ] || die "$REX_DIR 里还没有录音。"
+    [ -n "$wf" ] || dieL "$REX_DIR 里还没有录音。" "No recordings in $REX_DIR yet."
   fi
-  [ -f "$wf" ] || die "没有这个文件：$wf"
+  [ -f "$wf" ] || dieL "没有这个文件：$wf" "No such file: $wf"
   if [ -n "$(speaker_tracks "$wf")" ]; then
-    say "这条是分轨录的，rex text 出的已经是「${NAME_A} / ${NAME_B}」对话稿，标签是确定的，不用声纹猜。"
+    sayL "这条是分轨录的，rex text 出的已经是「${NAME_A} / ${NAME_B}」对话稿，标签是确定的，不用声纹猜。" "This one was recorded with separate tracks: rex text already produces a \"${NAME_A} / ${NAME_B}\" dialogue transcript, and the labels are certain, so no voiceprint guessing is needed."
     return 0
   fi
   if [ ! -f "${wf%.*}.srt" ]; then
-    say "${C_D}$(basename "$wf") 还没转写过，先转写${C_0}"
+    sayL "${C_D}$(basename "$wf") 还没转写过，先转写${C_0}" "${C_D}$(basename "$wf") has not been transcribed yet; transcribing it first${C_0}"
     need whisper-cli "brew install whisper-cpp"
     ensure_model
     transcribe_one "$wf"
     return $?
   fi
-  say "${C_D}给 $(basename "$wf") 分人（用已有的转写，不重转）${C_0}"
+  sayL "${C_D}给 $(basename "$wf") 分人（用已有的转写，不重转）${C_0}" "${C_D}Diarizing $(basename "$wf") (using the existing transcript, no re-transcription)${C_0}"
   wtmp="${TMPDIR:-/tmp}/rex-who-$$.wav"
-  to16k "$wf" 0:a:0 "$wtmp" || { warn "转 16k 单声道失败：$wf"; return 1; }
+  to16k "$wf" 0:a:0 "$wtmp" || { warnL "转 16k 单声道失败：$wf" "Failed to convert to 16k mono: $wf"; return 1; }
   diarize_files "$wf" "${wf%.*}" "$wtmp"
   wrc=$?
   rm -f "$wtmp"
-  [ "$wrc" -eq 0 ] && say "  ${C_G}✓${C_0} ${wf%.*}.txt   ${C_D}对话稿，.srt 每条也带着名字${C_0}"
+  [ "$wrc" -eq 0 ] && sayL "  ${C_G}✓${C_0} ${wf%.*}.txt   ${C_D}对话稿，.srt 每条也带着名字${C_0}" "  ${C_G}✓${C_0} ${wf%.*}.txt   ${C_D}dialogue transcript; every .srt entry carries the name too${C_0}"
   return 0
 }
 
@@ -1684,7 +1709,7 @@ text() {
     targets=$(printf '%s\n' "$@")
   else
     newest=$(ls -1t "$REX_DIR"/*.m4a "$REX_DIR"/*.wav 2>/dev/null | head -1)
-    [ -n "$newest" ] || die "$REX_DIR 里还没有录音。先 rex 录一段。"
+    [ -n "$newest" ] || dieL "$REX_DIR 里还没有录音。先 rex 录一段。" "No recordings in $REX_DIR yet. Record something with rex first."
     stem=$(basename "$newest" | sed -E 's/(-mic|-sys)?\.(m4a|wav)$//')
     targets=$(ls -1 "$REX_DIR/$stem"*.m4a "$REX_DIR/$stem"*.wav 2>/dev/null)
   fi
@@ -1707,8 +1732,8 @@ text() {
     fi
   done
   say ""
-  say "  ${C_D}认错词：先往 whisper-prompt.txt 里加（偏置，可能不生效）；${C_0}"
-  say "  ${C_D}还是错就写进 whisper-fix.txt 做确定性替换。两个都放 ~/.config/rex/（没有就从 ${TOOLS_DIR}/ 拷模板过去）${C_0}"
+  sayL "  ${C_D}认错词：先往 whisper-prompt.txt 里加（偏置，可能不生效）；${C_0}" "  ${C_D}Misrecognized words: first add them to whisper-prompt.txt (bias, may not take effect);${C_0}"
+  sayL "  ${C_D}还是错就写进 whisper-fix.txt 做确定性替换。两个都放 ~/.config/rex/（没有就从 ${TOOLS_DIR}/ 拷模板过去）${C_0}" "  ${C_D}if still wrong, put them in whisper-fix.txt for deterministic replacement. Both live in ~/.config/rex/ (if missing, copy the templates from ${TOOLS_DIR}/)${C_0}"
 }
 
 # ------------------------------------------------------------------ 一条龙（rex go / rex auto）
@@ -1790,9 +1815,9 @@ go_one() {
   if ! mkdir "$lk" 2>/dev/null; then
     op=$(cat "$lk/pid" 2>/dev/null)
     if [ -n "$op" ] && kill -0 "$op" 2>/dev/null; then
-      warn "这一条正在被别处处理（进程 ${op}：收件箱监视或另一个终端），这里不重复做"; return 1
+      warnL "这一条正在被别处处理（进程 ${op}：收件箱监视或另一个终端），这里不重复做" "This one is already being processed elsewhere (process ${op}: the inbox watcher or another terminal); not doing it twice"; return 1
     fi
-    rm -rf "$lk"; mkdir "$lk" 2>/dev/null || { warn "建不了处理锁 ${lk}"; return 1; }
+    rm -rf "$lk"; mkdir "$lk" 2>/dev/null || { warnL "建不了处理锁 ${lk}" "Cannot create the processing lock ${lk}"; return 1; }
   fi
   echo $$ > "$lk/pid"
   go_one_inner "$1"; rc=$?
@@ -1802,7 +1827,7 @@ go_one() {
 
 go_one_inner() {
   g="$1"
-  [ -f "$g" ] || { warn "没有这个文件：$g"; return 1; }
+  [ -f "$g" ] || { warnL "没有这个文件：$g" "No such file: $g"; return 1; }
   say ""
   say "${C_G}▶ $(basename "$g")${C_0}"
   gb="${g%.*}"
@@ -1818,8 +1843,8 @@ go_one_inner() {
     rm -f "$gtmp"
   fi
   if [ ! -s "$gb.srt" ]; then
-    say "  ${C_D}稿子是空的，后面的校对和分析跳过${C_0}"
-    notify "rex go：$(basename "$gb")" "没转出字（录音里没有人声？），校对和分析跳过"   # 收件箱先报过「开始处理」，得有个下文
+    sayL "  ${C_D}稿子是空的，后面的校对和分析跳过${C_0}" "  ${C_D}The transcript is empty; skipping proofreading and analysis${C_0}"
+    notify "$(L "rex go：$(basename "$gb")" "rex go: $(basename "$gb")")" "$(L '没转出字（录音里没有人声？），校对和分析跳过' 'No text transcribed (no voice in the recording?); proofreading and analysis skipped')"   # 收件箱先报过「开始处理」，得有个下文
     return 0
   fi
   name=$(basename "$gb")
@@ -1831,26 +1856,29 @@ go_one_inner() {
   gsec=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$g" 2>/dev/null)
   gbytes=$(wc -c < "$gb.txt" 2>/dev/null | tr -d ' ')
   if awk -v s="$gsec" -v b="${gbytes:-0}" 'BEGIN { exit !(s + 0 >= 300 && b + 0 < s / 2) }'; then
-    warn "  $(( ${gsec%.*} / 60 )) 分钟的录音只转出 ${gbytes} 字节，转写多半出了问题，先不交给 Claude"
-    notify "rex go：转写可能失败" "${name}：$(( ${gsec%.*} / 60 )) 分钟只转出几个字，没做校对和分析，看一眼稿子"
+    warnL "  $(( ${gsec%.*} / 60 )) 分钟的录音只转出 ${gbytes} 字节，转写多半出了问题，先不交给 Claude" "  The recording is $(( ${gsec%.*} / 60 )) minutes long but produced only ${gbytes} bytes of transcript; transcription most likely went wrong, so it is not sent to Claude"
+    notify "$(L 'rex go：转写可能失败' 'rex go: transcription may have failed')" "$(L "${name}：$(( ${gsec%.*} / 60 )) 分钟只转出几个字，没做校对和分析，看一眼稿子" "${name}: only a few words from $(( ${gsec%.*} / 60 )) minutes; no proofreading or analysis, take a look at the transcript")"
     return 0
   fi
 
   # 校对过、分析过的不重做，和转写一样。同一条录音再丢进收件箱一次的话，重校的是已经改过的
   # 稿子，报告会被「改了 0 处」盖掉，第一次改了什么就看不到了；分析也会再开一个会话
-  say "  ${C_D}── Claude 校对 ──${C_0}"
+  sayL "  ${C_D}── Claude 校对 ──${C_0}" "  ${C_D}── Claude proofreading ──${C_0}"
   pmode=full
   if [ -f "$gb.校对.md" ]; then
     if has_failed "$gb.校对.json"; then
-      say "  ${C_D}上次有几段没校成，这次只补那几段${C_0}"
+      sayL "  ${C_D}上次有几段没校成，这次只补那几段${C_0}" "  ${C_D}Some sections failed to proofread last time; only redoing those${C_0}"
       pmode=--retry
     else
-      say "  ${C_D}校对过了，不重校（要重校先删掉 ${name}.校对.md）${C_0}"
+      sayL "  ${C_D}校对过了，不重校（要重校先删掉 ${name}.校对.md）${C_0}" "  ${C_D}Already proofread, not redoing it (to redo it, delete ${name}.校对.md first)${C_0}"
       pmode=""
     fi
   fi
   if [ -z "$pmode" ]; then
-    ch=$(sed -n 's/^- 改了 \*\*\([0-9]*\)\*\* 处 · 拿不准、没改 \*\*\([0-9]*\)\*\* 处.*/\1 \2/p' "$gb.校对.md")
+    # 计数从 .校对.json 里数（和录音台的 proof_summary 一样）：.校对.md 那一行跟着输出语言变，英文是「Changed: **N** · …」，
+    # 按中文去匹配就读不出数、通知成了「校对没做成」。没有 .json 的老报告才退回读 .校对.md
+    ch=$(python3 -c 'import json, sys; s = json.load(open(sys.argv[1], encoding="utf-8")); print(len(s.get("applied", [])), len(s.get("unsure", [])))' "$gb.校对.json" 2>/dev/null) \
+      || ch=$(sed -n 's/^- 改了 \*\*\([0-9]*\)\*\* 处 · 拿不准、没改 \*\*\([0-9]*\)\*\* 处.*/\1 \2/p' "$gb.校对.md")
   else
     # 两个脚本的进度走 stderr、实时出现；stdout 只有给这里读的一行（CHANGES / ACCOUNT / SESSION）
     if [ "$pmode" = full ]; then pinfo=$(python3 "$TOOLS_DIR/proofread.py" "$gb")
@@ -1858,8 +1886,8 @@ go_one_inner() {
     prc=$?
     if [ "$prc" -eq 3 ]; then
       why=$(printf '%s\n' "$pinfo" | sed -n 's/^ACCOUNT //p' | head -1)
-      say "  ${C_Y}之后补做：${C_0}rex go \"${g}\""
-      notify "rex go：Claude 用不了" "${why:-Claude 用不了}。${name} 已经转写好了，之后 rex go 补做校对和分析"
+      sayL "  ${C_Y}之后补做：${C_0}rex go \"${g}\"" "  ${C_Y}Finish later with: ${C_0}rex go \"${g}\""
+      notify "$(L 'rex go：Claude 用不了' 'rex go: Claude unavailable')" "$(L "${why:-Claude 用不了}。${name} 已经转写好了，之后 rex go 补做校对和分析" "${why:-Claude unavailable}. ${name} is transcribed; run rex go later to add the proofreading and analysis")"
       return 0
     fi
     ch=$(printf '%s\n' "$pinfo" | awk '/^CHANGES /{ print $2 " " $3 }')
@@ -1867,15 +1895,15 @@ go_one_inner() {
   # 一份都没校成时 proofread.py 不写报告、也不给 CHANGES：通知不能说成「改了 0 处」
   if [ -n "$ch" ]; then
     set -- $ch
-    ptxt="校对改了 ${1} 处，${2} 处待你确认"
+    ptxt=$(L "校对改了 ${1} 处，${2} 处待你确认" "Proofreading: ${1} changed, ${2} awaiting your confirmation")
   else
-    ptxt="校对没做成（看日志）"
+    ptxt=$(L "校对没做成（看日志）" "Proofreading did not complete (see the log)")
   fi
 
-  say "  ${C_D}── Claude 分析 ──${C_0}"
+  sayL "  ${C_D}── Claude 分析 ──${C_0}" "  ${C_D}── Claude analysis ──${C_0}"
   arc=0
   if [ -f "$gb.分析.md" ]; then
-    say "  ${C_D}分析过了，不重做（要重做先删掉 ${name}.分析.md）${C_0}"
+    sayL "  ${C_D}分析过了，不重做（要重做先删掉 ${name}.分析.md）${C_0}" "  ${C_D}Already analyzed, not redoing it (to redo it, delete ${name}.分析.md first)${C_0}"
     sid=$(head -20 "$gb.分析.md" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
   else
     ainfo=$(python3 "$TOOLS_DIR/analyze.py" "$gb" --cwd "$REX_DIR")
@@ -1884,17 +1912,17 @@ go_one_inner() {
   fi
 
   say "  ${C_G}✓${C_0} ${gb}.txt   ${C_D}${ptxt}${C_0}"
-  [ -f "$gb.校对.md" ] && say "     ${C_D}${name}.校对.md（改了什么、哪些拿不准）${C_0}"
+  [ -f "$gb.校对.md" ] && sayL "     ${C_D}${name}.校对.md（改了什么、哪些拿不准）${C_0}" "     ${C_D}${name}.校对.md (what changed, what is uncertain)${C_0}"
   [ -f "$gb.分析.md" ] && say "     ${C_D}${name}.分析.md${C_0}"
   if [ -n "$sid" ]; then
-    say "     接着聊：${C_G}rex chat \"${g}\"${C_0}"
+    sayL "     接着聊：${C_G}rex chat \"${g}\"${C_0}" "     Continue the chat: ${C_G}rex chat \"${g}\"${C_0}"
   fi
   case "$arc" in
-    0) notify "rex go：${name}" "${ptxt}；分析写好了" ;;
+    0) notify "$(L "rex go：${name}" "rex go: ${name}")" "$(L "${ptxt}；分析写好了" "${ptxt}; analysis written")" ;;
     3) why=$(printf '%s\n' "$ainfo" | sed -n 's/^ACCOUNT //p' | head -1)
-       say "  ${C_Y}之后补做：${C_0}rex go \"${g}\""
-       notify "rex go：Claude 用不了" "${why:-Claude 用不了}。${name}：${ptxt}，分析没做，之后 rex go 补上" ;;
-    *) notify "rex go：${name}" "${ptxt}；分析没做成，看日志" ;;
+       sayL "  ${C_Y}之后补做：${C_0}rex go \"${g}\"" "  ${C_Y}Finish later with: ${C_0}rex go \"${g}\""
+       notify "$(L 'rex go：Claude 用不了' 'rex go: Claude unavailable')" "$(L "${why:-Claude 用不了}。${name}：${ptxt}，分析没做，之后 rex go 补上" "${why:-Claude unavailable}. ${name}: ${ptxt}; analysis not done, run rex go later to add it")" ;;
+    *) notify "$(L "rex go：${name}" "rex go: ${name}")" "$(L "${ptxt}；分析没做成，看日志" "${ptxt}; analysis did not complete, see the log")" ;;
   esac
 }
 
@@ -1910,12 +1938,12 @@ inbox_move() {
 # （访达把拖进来的选中文字存成 .textClipping），监视器扫了三遍都没反应，看上去就是「丢进去没用」
 inbox_reject() {
   case "$2" in
-    textclipping) why="拖进来的是一段文字（文件名），不是文件本身。在访达里拖那个音频文件的图标" ;;
-    "")           why="不是音视频文件（没有扩展名）" ;;
-    *)            why="不是音视频文件（.${2}）" ;;
+    textclipping) why=$(L "拖进来的是一段文字（文件名），不是文件本身。在访达里拖那个音频文件的图标" "What was dragged in is a piece of text (the file name), not the file itself. In Finder, drag the audio file's icon") ;;
+    "")           why=$(L "不是音视频文件（没有扩展名）" "Not an audio or video file (no extension)") ;;
+    *)            why=$(L "不是音视频文件（.${2}）" "Not an audio or video file (.${2})") ;;
   esac
-  warn "  $(basename "$1")：${why}。挪进「转不了」"
-  notify "rex go：没法处理" "$(basename "$1")：${why}"
+  warnL "  $(basename "$1")：${why}。挪进「转不了」" "  $(basename "$1"): ${why}. Moved to the 转不了 folder"
+  notify "$(L 'rex go：没法处理' "rex go: can't process")" "$(L "$(basename "$1")：${why}" "$(basename "$1"): ${why}")"
   inbox_move "$1" 转不了
 }
 
@@ -1928,11 +1956,11 @@ go_inbox() {
     if [ -n "$(find "$lock" -maxdepth 0 -mmin +360 2>/dev/null)" ]; then
       rm -rf "$lock"; mkdir "$lock" 2>/dev/null || return 0      # 六小时还没删的是崩掉留下的
     else
-      say "已经有一个 rex go 在处理收件箱，它做完会再扫一遍。"; return 0
+      sayL "已经有一个 rex go 在处理收件箱，它做完会再扫一遍。" "Another rex go is already processing the inbox; it will scan again when it finishes."; return 0
     fi
   fi
   trap 'rm -rf "$lock"' EXIT
-  say "$(date '+%Y-%m-%d %H:%M:%S') 扫收件箱 $INBOX"
+  sayL "$(date '+%Y-%m-%d %H:%M:%S') 扫收件箱 $INBOX" "$(date '+%Y-%m-%d %H:%M:%S') Scanning the inbox $INBOX"
   # 这一轮试过的不再试。第一版没有这个：取不出音频的文件留在原地，下一圈又被捡起来，死循环
   tried=$'\n'
   while :; do
@@ -1955,13 +1983,13 @@ go_inbox() {
         # 一收到就说一声：长录音要跑半小时以上，只在最后通知的话，中间看上去和没反应一样
         mins=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$g" 2>/dev/null \
                | awk '{ m = int($1 / 60 + 0.5); if (m > 0) printf "%d", m }')
-        notify "rex go：开始处理" "${bn}${mins:+（${mins} 分钟）}。转写、分人、Claude 校对和分析，做完再通知你"
+        notify "$(L 'rex go：开始处理' 'rex go: processing started')" "$(L "${bn}${mins:+（${mins} 分钟）}。转写、分人、Claude 校对和分析，做完再通知你" "${bn}${mins:+ (${mins} min)}. Transcription, diarization, Claude proofreading and analysis; you'll be notified when it's done")"
         # 要处理的是拷进 REX_DIR 的那份，所以原件成不成都挪走；没走完就对那份再 rex go
-        go_one "$g" || warn "  ${bn} 没走完（看上面的报错）。拷进来的那份在 ${REX_DIR}，可以再 rex go 它"
+        go_one "$g" || warnL "  ${bn} 没走完（看上面的报错）。拷进来的那份在 ${REX_DIR}，可以再 rex go 它" "  ${bn} did not finish (see the errors above). The imported copy is in ${REX_DIR}; you can run rex go on it again"
         inbox_move "$p" 已处理
       else
-        warn "  取不出音频：${bn}，挪进「转不了」"
-        notify "rex go：没法处理" "${bn} 里取不出音频，挪进了 收件箱/转不了"
+        warnL "  取不出音频：${bn}，挪进「转不了」" "  Cannot extract audio: ${bn}; moved to the 转不了 folder"
+        notify "$(L 'rex go：没法处理' "rex go: can't process")" "$(L "${bn} 里取不出音频，挪进了 收件箱/转不了" "Cannot extract audio from ${bn}; moved to 收件箱/转不了")"
         inbox_move "$p" 转不了
       fi
       picked=1
@@ -1980,13 +2008,13 @@ go_cmd() {
   if [ -n "${GO_INBOX:-}" ]; then go_inbox; return $?; fi
   if [ "$#" -eq 0 ]; then
     gf=$(ls -1t "$REX_DIR"/*.m4a "$REX_DIR"/*.wav 2>/dev/null | head -1)
-    [ -n "$gf" ] || die "$REX_DIR 里还没有录音。"
+    [ -n "$gf" ] || dieL "$REX_DIR 里还没有录音。" "No recordings in $REX_DIR yet."
     set -- "$gf"
   fi
   for gf in "$@"; do
     case "$gf" in
       "$REX_DIR"/*) go_one "$gf" ;;
-      *) gi=$(import_drop "$gf") && go_one "$gi" || warn "取不出音频：$gf" ;;
+      *) gi=$(import_drop "$gf") && go_one "$gi" || warnL "取不出音频：$gf" "Cannot extract audio: $gf" ;;
     esac
   done
 }
@@ -2004,20 +2032,20 @@ claude_uargs() {   # 结果在 uargs：env 用的一串 -u 变量名
 }
 
 login_cmd() {
-  need claude "先装 Claude Code 命令行"
+  need claude "$(L '先装 Claude Code 命令行' 'the Claude Code CLI')"
   claude_uargs
   if [ "${1:-}" = status ]; then
     env ${uargs[@]+"${uargs[@]}"} claude auth status
     return
   fi
-  say "登录 Claude 账号（rex go 的校对和分析用它）。会打开浏览器，在那里确认就好。"
+  sayL "登录 Claude 账号（rex go 的校对和分析用它）。会打开浏览器，在那里确认就好。" "Signing in to a Claude account (rex go uses it for proofreading and analysis). A browser opens; confirm there."
   env ${uargs[@]+"${uargs[@]}"} claude auth login --claudeai
   st=$(env ${uargs[@]+"${uargs[@]}"} claude auth status 2>/dev/null)
   case "$st" in
     *'"loggedIn": true'*)
-      say "${C_G}✓ 登好了${C_0}。rex go 和收件箱从现在起用这个账号；你平时在终端里敲 claude 不受影响。" ;;
+      sayL "${C_G}✓ 登好了${C_0}。rex go 和收件箱从现在起用这个账号；你平时在终端里敲 claude 不受影响。" "${C_G}✓ Signed in${C_0}. rex go and the inbox use this account from now on; running claude in your terminal is unaffected." ;;
     *)
-      warn "还是没登上。再跑一次 rex login，或者看上面的报错。" ;;
+      warnL "还是没登上。再跑一次 rex login，或者看上面的报错。" "Still not signed in. Run rex login again, or check the errors above." ;;
   esac
 }
 
@@ -2055,23 +2083,23 @@ app_cmd() {
         REX_DIR="$REX_DIR" REX_APP_PORT="$APP_PORT" nohup python3 "$TOOLS_DIR/rex_app.py" >> "$APP_LOG" 2>&1 &
         echo $! > "$APP_PID"
         for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do app_up && break; sleep 0.5; done
-        app_up || die "录音台没起来，看日志：${APP_LOG}（端口 ${APP_PORT} 被占了的话，用 REX_APP_PORT 换一个）"
+        app_up || dieL "录音台没起来，看日志：${APP_LOG}（端口 ${APP_PORT} 被占了的话，用 REX_APP_PORT 换一个）" "The Recording Desk did not start; see the log: ${APP_LOG} (if port ${APP_PORT} is taken, choose another one with REX_APP_PORT)"
       fi
       [ "${1:-open}" = start ] || open "http://127.0.0.1:$APP_PORT/"
-      say "录音台：${C_G}http://127.0.0.1:$APP_PORT/${C_0}"
-      say "  ${C_D}Safari 里「文件 → 添加到程序坞」，以后从程序坞点开就像一个 App。关掉：rex app stop${C_0}"
+      sayL "录音台：${C_G}http://127.0.0.1:$APP_PORT/${C_0}" "Recording Desk: ${C_G}http://127.0.0.1:$APP_PORT/${C_0}"
+      sayL "  ${C_D}Safari 里「文件 → 添加到程序坞」，以后从程序坞点开就像一个 App。关掉：rex app stop${C_0}" "  ${C_D}In Safari, File → Add to Dock, and from then on it opens from the Dock like an app. To close it: rex app stop${C_0}"
       ;;
     stop)
       if p=$(app_pid); then
         kill "$p" 2>/dev/null
         for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$p" 2>/dev/null || break; sleep 0.3; done
         kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null
-        rm -f "$APP_PID"; say "录音台关了。"
-      else say "录音台本来就没开。"; fi ;;
+        rm -f "$APP_PID"; sayL "录音台关了。" "Recording Desk stopped."
+      else sayL "录音台本来就没开。" "The Recording Desk was not running."; fi ;;
     restart) app_cmd stop; sleep 1; app_cmd open ;;
     status|*)
-      if app_up; then say "${C_G}● 开着${C_0} http://127.0.0.1:$APP_PORT/    日志 $APP_LOG"
-      else say "○ 没开（打开：rex app）"; fi ;;
+      if app_up; then sayL "${C_G}● 开着${C_0} http://127.0.0.1:$APP_PORT/    日志 $APP_LOG" "${C_G}● Running${C_0} http://127.0.0.1:$APP_PORT/    log $APP_LOG"
+      else sayL "○ 没开（打开：rex app）" "○ Not running (start it: rex app)"; fi ;;
   esac
 }
 
@@ -2079,19 +2107,23 @@ app_cmd() {
 # 别家接口，带着那些变量 resume，稿子就发到那边去了（余额不够时还会撞 402）。
 # 清掉再起，用的是 rex login 那个 Claude 账号。会话存在 REX_DIR 下（analyze.py 的 --cwd），要在那儿 resume。
 chat_cmd() {
-  need claude "先装 Claude Code 命令行"
+  need claude "$(L '先装 Claude Code 命令行' 'the Claude Code CLI')"
   if [ -z "${1:-}" ]; then
     am=$(ls -1t "$REX_DIR"/*.分析.md 2>/dev/null | head -1)
   else
     case "$1" in *.分析.md) am="$1" ;; *) am="${1%.*}.分析.md" ;; esac
   fi
-  [ -n "$am" ] && [ -f "$am" ] || die "找不到分析报告${am:+：$am}。先对那条录音跑 rex go"
+  [ -n "$am" ] && [ -f "$am" ] || dieL "找不到分析报告${am:+：$am}。先对那条录音跑 rex go" "No analysis report found${am:+: $am}. Run rex go on that recording first"
   sid=$(head -20 "$am" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
-  [ -n "$sid" ] || die "${am} 里找不到会话号"
+  [ -n "$sid" ] || dieL "${am} 里找不到会话号" "No session ID found in ${am}"
+  # 只在终端里交互着用。标准输入不是终端时，claude 会把它读进来当成提问、续上会话直接作答——2026-10-14 一次测试
+  # 脚本里调了 rex chat，脚本剩下的文字就这样发进了某条录音的分析会话，那个会话还按本机的权限设置跑了命令
+  [ -t 0 ] || dieL "rex chat 要在终端里交互着用（标准输入不是终端，没有接着聊）" "rex chat must be run interactively in a terminal (stdin is not a terminal; not starting the chat)"
   claude_uargs
-  say "接着聊：$(basename "${am%.分析.md}")（稿子、校对报告、第一轮分析都在这个会话里；/exit 退出）"
-  cd "$REX_DIR" || die "进不去 $REX_DIR"
-  exec env ${uargs[@]+"${uargs[@]}"} claude --resume "$sid"
+  sayL "接着聊：$(basename "${am%.分析.md}")（稿子、校对报告、第一轮分析都在这个会话里；/exit 退出）" "Continuing the chat: $(basename "${am%.分析.md}") (the transcript, the proofreading report and the first analysis are all in this session; /exit to quit)"
+  cd "$REX_DIR" || dieL "进不去 $REX_DIR" "Cannot enter $REX_DIR"
+  # 接着聊只问稿子的事，用不着工具；关掉，续上的会话就不会在本机执行命令（分析那次本来就是 --tools ""）
+  exec env ${uargs[@]+"${uargs[@]}"} claude --resume "$sid" --tools ""
 }
 
 auto_cmd() {
@@ -2102,7 +2134,7 @@ auto_cmd() {
       # 跑的是 $RUNTIME 里的副本，原因见 RUNTIME 那几行注释
       mkdir -p "$RUNTIME/tools"
       rsync -a --delete --exclude __pycache__ "$TOOLS_DIR/" "$RUNTIME/tools/" && touch "$RUNTIME/.synced" \
-        || die "拷不出脚本副本到 $RUNTIME"
+        || dieL "拷不出脚本副本到 $RUNTIME" "Failed to copy the scripts to $RUNTIME"
       # launchd 的 PATH 只有系统目录：装的时候把 ffmpeg / whisper / python3 / claude 所在目录写死
       lp=""
       for b in ffmpeg whisper-cli python3 claude; do
@@ -2110,7 +2142,7 @@ auto_cmd() {
         case ":$lp:" in *":$d:"*) ;; *) lp="${lp:+$lp:}$d" ;; esac
       done
       lp="$lp:/usr/bin:/bin:/usr/sbin:/sbin"
-      command -v claude >/dev/null 2>&1 || warn "  没找到 claude 命令行：转写会照做，校对和分析会跳过"
+      command -v claude >/dev/null 2>&1 || warnL "  没找到 claude 命令行：转写会照做，校对和分析会跳过" "  claude CLI not found: transcription still runs, proofreading and analysis are skipped"
       cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -2136,28 +2168,28 @@ auto_cmd() {
 PLIST
       launchctl bootout "gui/$(id -u)/$INBOX_LABEL" 2>/dev/null || true
       launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || launchctl load "$plist"
-      say "${C_G}✓ 装好了${C_0}：往 ${C_G}${INBOX}${C_0} 里丢录音，就自动转写 → 分人 → Claude 校对 → 分析"
-      say "  ${C_D}处理完原件挪进「已处理」，结果在 ${REX_DIR}；日志 ${INBOX_LOG}${C_0}"
-      say "  ${C_D}访达里把这个文件夹拖到边栏，以后直接往里拖就行。打开它：rex auto open${C_0}"
+      sayL "${C_G}✓ 装好了${C_0}：往 ${C_G}${INBOX}${C_0} 里丢录音，就自动转写 → 分人 → Claude 校对 → 分析" "${C_G}✓ Installed${C_0}: drop recordings into ${C_G}${INBOX}${C_0} and they are transcribed → diarized → proofread by Claude → analyzed automatically"
+      sayL "  ${C_D}处理完原件挪进「已处理」，结果在 ${REX_DIR}；日志 ${INBOX_LOG}${C_0}" "  ${C_D}After processing, the originals move into 已处理; results go to ${REX_DIR}; log ${INBOX_LOG}${C_0}"
+      sayL "  ${C_D}访达里把这个文件夹拖到边栏，以后直接往里拖就行。打开它：rex auto open${C_0}" "  ${C_D}Drag this folder into the Finder sidebar, then just drop files onto it. To open it: rex auto open${C_0}"
       ;;
     uninstall|remove)
       launchctl bootout "gui/$(id -u)/$INBOX_LABEL" 2>/dev/null || launchctl unload "$plist" 2>/dev/null || true
       rm -f "$plist"
       case "$RUNTIME" in */rex-runtime) rm -rf "$RUNTIME" ;; esac
-      say "收件箱监视已卸掉（收件箱文件夹和里面的东西不动）。"
+      sayL "收件箱监视已卸掉（收件箱文件夹和里面的东西不动）。" "Inbox watcher removed (the inbox folder and its contents are left alone)."
       ;;
     open) mkdir -p "$INBOX"; open "$INBOX" ;;
     status|*)
       if launchctl print "gui/$(id -u)/$INBOX_LABEL" >/dev/null 2>&1; then
-        say "${C_G}● 在盯着${C_0} $INBOX"
+        sayL "${C_G}● 在盯着${C_0} $INBOX" "${C_G}● Watching${C_0} $INBOX"
       else
-        say "○ 没装（装：rex auto install）    收件箱：$INBOX"
+        sayL "○ 没装（装：rex auto install）    收件箱：$INBOX" "○ Not installed (install: rex auto install)    inbox: $INBOX"
       fi
       n=$(ls -1 "$INBOX" 2>/dev/null | grep -ciE "\.(${MEDIA_GLOB})\$" || true)
       d=$(ls -1 "$INBOX/已处理" 2>/dev/null | wc -l | tr -d ' ')
-      say "  待处理 ${n:-0} 个 · 已处理 ${d:-0} 个"
-      [ -d "$REX_DIR/.go.lock" ] && say "  ${C_Y}正在处理${C_0}（做到哪一步看下面的日志）"
-      if [ -s "$INBOX_LOG" ]; then say "  ${C_D}日志最后几行：${C_0}"; tail -n 5 "$INBOX_LOG" | sed 's/^/    /'; fi
+      sayL "  待处理 ${n:-0} 个 · 已处理 ${d:-0} 个" "  ${n:-0} waiting · ${d:-0} processed"
+      [ -d "$REX_DIR/.go.lock" ] && sayL "  ${C_Y}正在处理${C_0}（做到哪一步看下面的日志）" "  ${C_Y}Processing now${C_0} (see the log below for progress)"
+      if [ -s "$INBOX_LOG" ]; then sayL "  ${C_D}日志最后几行：${C_0}" "  ${C_D}Last lines of the log:${C_0}"; tail -n 5 "$INBOX_LOG" | sed 's/^/    /'; fi
       ;;
   esac
 }
@@ -2167,7 +2199,7 @@ PLIST
 # 现场采 1.5 秒，只报峰值。不碰正在录的那个 ffmpeg。
 status_level() {
   idx="$1"; label="$2"; kind="${3:-mic}"
-  [ -n "$idx" ] || { warn "  ${label}：找不到设备"; return; }
+  [ -n "$idx" ] || { warnL "  ${label}：找不到设备" "  ${label}: device not found"; return; }
   t="${TMPDIR:-/tmp}/rex-lvl-$$.wav"
   ffmpeg -hide_banner -loglevel error -f avfoundation -i ":$idx" \
          -t 1.5 -ac 1 -ar 48000 -y "$t" 2>/dev/null
@@ -2183,21 +2215,21 @@ status_level() {
   if [ "$kind" = sys ]; then
     if ! sys_route_ok; then
       cn=$("$AD" name "$("$AD" default 2>/dev/null)" 2>/dev/null)
-      printf '  %s%s ⚠ 路由断了：当前输出「%s」里没有 BlackHole%s\n' \
+      printf "$(L '  %s%s ⚠ 路由断了：当前输出「%s」里没有 BlackHole%s\n' '  %s%s ⚠ routing broken: the current output "%s" has no BlackHole%s\n')" \
         "$C_Y" "$label" "${cn:-?}" "$C_0"
     elif [ "$quiet" = 1 ]; then
-      printf '  %s%s 峰值 %s dB  路由正常，此刻没有声音在放%s\n' \
+      printf "$(L '  %s%s 峰值 %s dB  路由正常，此刻没有声音在放%s\n' '  %s%s peak %s dB  routing OK, nothing is playing right now%s\n')" \
         "$C_D" "$label" "${p:-?}" "$C_0"
     else
-      printf '  %s%s 峰值 %s dB  有声音%s\n' "$C_G" "$label" "$p" "$C_0"
+      printf "$(L '  %s%s 峰值 %s dB  有声音%s\n' '  %s%s peak %s dB  sound present%s\n')" "$C_G" "$label" "$p" "$C_0"
     fi
     return
   fi
 
   if [ "$quiet" = 1 ]; then
-    printf '  %s%s 峰值 %s dB  ⚠ 这一路没有信号%s\n' "$C_Y" "$label" "${p:-?}" "$C_0"
+    printf "$(L '  %s%s 峰值 %s dB  ⚠ 这一路没有信号%s\n' '  %s%s peak %s dB  ⚠ no signal on this track%s\n')" "$C_Y" "$label" "${p:-?}" "$C_0"
   else
-    printf '  %s%s 峰值 %s dB  有声音%s\n' "$C_G" "$label" "$p" "$C_0"
+    printf "$(L '  %s%s 峰值 %s dB  有声音%s\n' '  %s%s peak %s dB  sound present%s\n')" "$C_G" "$label" "$p" "$C_0"
   fi
 }
 
@@ -2205,15 +2237,15 @@ status() {
   if [ ! -f "$STATE" ]; then
     o=$(orphan_recs)
     if [ -n "$o" ]; then
-      warn "没有登记在录的，但后台有录音进程在跑：$(printf '%s\n' "$o" | awk '{print $2}' | xargs -n1 basename | tr '\n' ' ')"
-      say "  跑 rex stop 把它停下、收好尾。"
+      warnL "没有登记在录的，但后台有录音进程在跑：$(printf '%s\n' "$o" | awk '{print $2}' | xargs -n1 basename | tr '\n' ' ')" "No recording is registered, but a recording process is running in the background: $(printf '%s\n' "$o" | awk '{print $2}' | xargs -n1 basename | tr '\n' ' ')"
+      sayL "  跑 rex stop 把它停下、收好尾。" "  Run rex stop to stop it and finalize the file."
       return 1
     fi
-    say "没有在录。"; return 0
+    sayL "没有在录。" "Not recording."; return 0
   fi
-  if ! alive; then warn "状态文件还在，但进程已经没了。跑一次 rex stop 清掉。"; return 1; fi
+  if ! alive; then warnL "状态文件还在，但进程已经没了。跑一次 rex stop 清掉。" "The state file is still there, but the process is gone. Run rex stop once to clear it."; return 1; fi
   t0=$(getf start); el=$(( $(date +%s) - t0 ))
-  say "${C_G}● 在录${C_0} · $(getf mode) · 已 $((el / 60)) 分 $((el % 60)) 秒"
+  sayL "${C_G}● 在录${C_0} · $(getf mode) · 已 $((el / 60)) 分 $((el % 60)) 秒" "${C_G}● Recording${C_0} · $(getf mode) · $((el / 60)) min $((el % 60)) s so far"
 
   printf '%s\n' "$(getf files)" | tr '|' '\n' | while IFS= read -r f; do
     [ -n "$f" ] && say "  $f  $( [ -f "$f" ] && du -h "$f" | cut -f1 | tr -d ' ' )"
@@ -2237,27 +2269,27 @@ status() {
     shown=1
     set -- $lv
     now=$(date +%s)
-    if [ "$tag" = mic ]; then nm="麦克风（你）"; else nm="系统声音（对方）"; fi
+    if [ "$tag" = mic ]; then nm=$(L "麦克风（你）" "Microphone (you)"); else nm=$(L "系统声音（对方）" "System audio (other side)"); fi
     if [ $((now - $3)) -gt 10 ]; then
-      warn "  ✗ ${nm}：采集停了（$((now - $3)) 秒没有新数据）"
+      warnL "  ✗ ${nm}：采集停了（$((now - $3)) 秒没有新数据）" "  ✗ ${nm}: capture stopped (no new data for $((now - $3)) s)"
     elif [ "$2" -gt 0 ]; then
-      if [ "$tag" = mic ] && [ $((now - $2)) -ge 3 ]; then warn "  ✗ ${nm}：数字静音已经 $((now - $2)) 秒，麦克风没接上"
-      else say "  ○ ${nm}：此刻没声音（$((now - $2)) 秒）——放着东西的话就是没录进来"; fi
+      if [ "$tag" = mic ] && [ $((now - $2)) -ge 3 ]; then warnL "  ✗ ${nm}：数字静音已经 $((now - $2)) 秒，麦克风没接上" "  ✗ ${nm}: digital silence for $((now - $2)) s; the microphone isn't connected"
+      else sayL "  ○ ${nm}：此刻没声音（$((now - $2)) 秒）——放着东西的话就是没录进来" "  ○ ${nm}: no sound right now ($((now - $2)) s); if something is playing, it isn't being recorded"; fi
     else
-      say "  ${C_G}✓${C_0} ${nm}：峰值 ${1} dB"
+      sayL "  ${C_G}✓${C_0} ${nm}：峰值 ${1} dB" "  ${C_G}✓${C_0} ${nm}: peak ${1} dB"
     fi
   done
   if [ "$(getf sys)" = blackhole ] && ! sys_route_ok; then
-    warn "  ✗ 输出被切走了，BlackHole 收不到（路由监视两秒内会接回；一直这样就是接不回）"
+    warnL "  ✗ 输出被切走了，BlackHole 收不到（路由监视两秒内会接回；一直这样就是接不回）" "  ✗ The output was switched away, so BlackHole receives nothing (the route watcher reconnects it within two seconds; if this persists, it can't)"
   elif [ "$(getf sys)" = tap ]; then
-    say "  ${C_D}系统声音走系统音频接口，不受输出设备切换影响${C_0}"
+    sayL "  ${C_D}系统声音走系统音频接口，不受输出设备切换影响${C_0}" "  ${C_D}System audio goes through the system audio tap, unaffected by output device switches${C_0}"
   fi
   if [ -z "$shown" ]; then
     case "$(getf mode)" in
-      mic)  status_level "$(pick_mic mic)"     "麦克风（你）" ;;
-      sys)  status_level "$(avf_index BlackHole)" "系统声音（对方）" sys ;;
-      both) status_level "$(pick_mic both)"    "麦克风（你）" mic
-            status_level "$(avf_index BlackHole)" "系统声音（对方）" sys ;;
+      mic)  status_level "$(pick_mic mic)"     "$(L '麦克风（你）' 'Microphone (you)')" ;;
+      sys)  status_level "$(avf_index BlackHole)" "$(L '系统声音（对方）' 'System audio (other side)')" sys ;;
+      both) status_level "$(pick_mic both)"    "$(L '麦克风（你）' 'Microphone (you)')" mic
+            status_level "$(avf_index BlackHole)" "$(L '系统声音（对方）' 'System audio (other side)')" sys ;;
     esac
   fi
   # ffmpeg 的进度是用 \r 刷新的，整个 log 是一行，取末尾看它还在不在动。
@@ -2268,11 +2300,11 @@ status() {
 list() {
   mkdir -p "$REX_DIR"
   n=$(ls -1 "$REX_DIR" 2>/dev/null | grep -cE '\.(m4a|wav)$')
-  say "$REX_DIR  （共 $n 个）"
+  sayL "$REX_DIR  （共 $n 个）" "$REX_DIR  ($n total)"
   # 先收进变量再遍历：直接 ls 两个 glob，缺其中一种后缀时 ls 会报错退非零，
   # 整个脚本跟着返回失败——列个目录不该是「失败」。
   recent=$(ls -1t "$REX_DIR"/*.m4a "$REX_DIR"/*.wav 2>/dev/null | head -10)
-  [ -n "$recent" ] || { say "  （还没有录音）"; return 0; }
+  [ -n "$recent" ] || { sayL "  （还没有录音）" "  (no recordings yet)"; return 0; }
   printf '%s\n' "$recent" | while IFS= read -r f; do
     d=$(ffprobe -v quiet -show_entries format=duration -of csv=p=0 "$f" 2>/dev/null | cut -d. -f1)
     d=${d:-0}
@@ -2290,7 +2322,7 @@ trim_cmd() {
     targets=$(printf '%s\n' "$@")
   else
     newest=$(ls -1t "$REX_DIR"/*.m4a "$REX_DIR"/*.wav 2>/dev/null | head -1)
-    [ -n "$newest" ] || die "$REX_DIR 里还没有录音。"
+    [ -n "$newest" ] || dieL "$REX_DIR 里还没有录音。" "No recordings in $REX_DIR yet."
     # --split 录出来的是一对，两个都要切，不然两轨长度对不上
     stem=$(basename "$newest" | sed -E 's/(-mic|-sys)?\.(m4a|wav)$//')
     targets=$(ls -1 "$REX_DIR/$stem"*.m4a "$REX_DIR/$stem"*.wav 2>/dev/null)
@@ -2310,7 +2342,7 @@ trim_cmd() {
 # 自己就把音频地址摆在 og:audio 里（那是给别的播放器嵌用的标准标签）。
 url_cmd() {
   u="${1:-}"
-  [ -n "$u" ] || die "要一个链接，比如 rex url https://www.xiaoyuzhoufm.com/episode/xxxx"
+  [ -n "$u" ] || dieL "要一个链接，比如 rex url https://www.xiaoyuzhoufm.com/episode/xxxx" "Expected a link, e.g. rex url https://www.xiaoyuzhoufm.com/episode/xxxx"
   need ffmpeg "brew install ffmpeg"
   mkdir -p "$REX_DIR"
 
@@ -2339,6 +2371,13 @@ find_cmd() {
   q="${1:-}"
   REX_DIR="$REX_DIR" VM_DIR="$VM_DIR" python3 - "$q" <<'PY'
 import os, re, sys, glob, time
+
+EN = os.environ.get("REX_LANG") == "en"
+
+
+def L(zh, en):
+    return en if EN else zh
+
 
 q = sys.argv[1] if len(sys.argv) > 1 else ""
 d = os.environ["REX_DIR"]
@@ -2377,20 +2416,21 @@ for e in extra:
              if not os.path.basename(p).startswith("_")]
 
 if not txts and not docs:
-    print("  %s 里还没有转写稿。" % d)
+    print(L("  %s 里还没有转写稿。", "  No transcripts in %s yet.") % d)
 elif not q:
     if txts:
-        print("  %s 里的转写稿（%d 份）\n" % (d, len(txts)))
+        print(L("  %s 里的转写稿（%d 份）\n", "  Transcripts in %s (%d)\n") % (d, len(txts)))
         for p in txts:
-            print("  %s  %5d 字  %s" % (when(p), chars(read(p)), os.path.basename(p)))
+            print(L("  %s  %5d 字  %s", "  %s  %5d chars  %s") % (when(p), chars(read(p)), os.path.basename(p)))
     else:
-        print("  %s 里还没有转写稿。" % d)
+        print(L("  %s 里还没有转写稿。", "  No transcripts in %s yet.") % d)
     # 文档不逐个列——一千多行刷屏，而且没有时间线可言，只报个数。
     # 要看清单去 _索引.tsv，那里带字数和原始路径。
     for e in extra:
         n = len([1 for r, _ in docs if r == e])
-        print("\n  另有 %d 份文档正文可搜：%s" % (n, e))
-        print("  （不逐条列了，给个词搜就行；完整清单在 %s/_索引.tsv）" % e)
+        print(L("\n  另有 %d 份文档正文可搜：%s", "\n  Plus %d document(s) searchable by full text: %s") % (n, e))
+        print(L("  （不逐条列了，给个词搜就行；完整清单在 %s/_索引.tsv）",
+                "  (not listed one by one; give a word to search. The full list is in %s/_索引.tsv)") % e)
 else:
     ql = q.lower()
 
@@ -2401,18 +2441,18 @@ else:
                  if ln.strip() and ql in ln.lower()]
         if not in_name and not lines:
             return False
-        tag = "  （文件名命中）" if in_name and not lines else ""
-        print("\n  %s  %5d 字  %s%s" % (label or when(p), chars(t), name, tag))
+        tag = L("  （文件名命中）", "  (file name match)") if in_name and not lines else ""
+        print(L("\n  %s  %5d 字  %s%s", "\n  %s  %5d chars  %s%s") % (label or when(p), chars(t), name, tag))
         for ln in lines[:3]:
             i = ln.lower().index(ql)
             a, b = max(0, i - 22), min(len(ln), i + len(q) + 22)
             print("     %s%s%s" % ("…" if a else "", ln[a:b], "…" if b < len(ln) else ""))
         if len(lines) > 3:
-            print("     （这份里还有 %d 处）" % (len(lines) - 3))
+            print(L("     （这份里还有 %d 处）", "     (%d more in this one)") % (len(lines) - 3))
         return True
 
     hits = sum(1 for p in txts if show(p, read(p)))
-    print("\n  录音稿：%d/%d 份命中 · %s" % (hits, len(txts), d))
+    print(L("\n  录音稿：%d/%d 份命中 · %s", "\n  Recording transcripts: %d/%d match · %s") % (hits, len(txts), d))
 
     for e in extra:
         mine = [p for r, p in docs if r == e]
@@ -2424,17 +2464,18 @@ else:
             if ql not in t.lower() and ql not in os.path.basename(p).lower():
                 continue
             # 「文档」显示宽度是 4，而日期「08-14」是 5——补一个空格才和录音稿那列对齐
-            if show(p, t, label="文档 "):
+            if show(p, t, label=L("文档 ", "doc  ")):
                 dh += 1
-        print("\n  文档：%d/%d 份命中 · %s" % (dh, len(mine), e))
+        print(L("\n  文档：%d/%d 份命中 · %s", "\n  Documents: %d/%d match · %s") % (dh, len(mine), e))
         hits += dh
 
     if not hits:
-        print("\n  都没有「%s」。" % q)
+        print(L("\n  都没有「%s」。", '\n  No match for "%s" anywhere.') % q)
 
 for p in gone:
-    print("\n  ⚠️ 登记过的文本目录现在不可达（硬盘没插？）：%s" % p)
-    print("     这次搜索**没有**覆盖它。目录名单在 %s" % CONF)
+    print(L("\n  ⚠️ 登记过的文本目录现在不可达（硬盘没插？）：%s",
+            "\n  ⚠️ A registered text folder is unreachable right now (drive not plugged in?): %s") % p)
+    print(L("     这次搜索**没有**覆盖它。目录名单在 %s", "     This search did **not** cover it. The folder list is in %s") % CONF)
 
 # 没转写的备忘录也报一下，否则「找不到」会被误解成「丢了」
 vm = os.environ.get("VM_DIR", "")
@@ -2444,33 +2485,102 @@ if vm and os.path.isdir(vm):
     except OSError:
         n = -1
     if n < 0:
-        print("\n  （读不了语音备忘录目录，多半是终端缺「完整磁盘访问权限」）")
+        print(L("\n  （读不了语音备忘录目录，多半是终端缺「完整磁盘访问权限」）",
+                "\n  (Cannot read the Voice Memos folder; the terminal most likely lacks Full Disk Access)"))
     elif n:
-        print("\n  iPhone 里另有 %d 条语音备忘录**还没转写** —— rex phone 看列表" % n)
+        print(L("\n  iPhone 里另有 %d 条语音备忘录**还没转写** —— rex phone 看列表",
+                "\n  Also on the iPhone: %d voice memo(s) **not transcribed yet**; rex phone shows the list") % n)
 PY
 }
 
 devices() {
   ensure_ad
   din=$("$AD" default-in); dout=$("$AD" default)
-  say "麦克风（--device 用这里的名字）："
+  sayL "麦克风（--device 用这里的名字）：" "Microphones (use these names with --device):"
   # 不做列对齐：printf 的 %-28s 数的是字节，中文名会把表格排歪。
   "$AD" list-in | while IFS=$'\t' read -r u t n; do
     mark="  "; [ "$n" = "$din" ] && mark="${C_G}→ ${C_0}"
     printf '%s%s  %s\n' "$mark" "$n" "${C_D}($t)${C_0}"
   done
   say ""
-  say "输出设备："
+  sayL "输出设备：" "Output devices:"
   "$AD" list | while IFS=$'\t' read -r u t n; do
     mark="  "; [ "$u" = "$dout" ] && mark="${C_G}→ ${C_0}"
     printf '%s%s  %s\n' "$mark" "$n" "${C_D}($t)${C_0}"
   done
   say ""
-  say "${C_D}→ 是现在的默认。rex mic 跟随默认麦克风；rex sys 会按默认输出现建直通设备。${C_0}"
+  sayL "${C_D}→ 是现在的默认。rex mic 跟随默认麦克风；rex sys 会按默认输出现建直通设备。${C_0}" "${C_D}→ marks the current default. rex mic follows the default microphone; rex sys builds a passthrough device from the default output on the fly.${C_0}"
 }
 
 # 用头部注释当帮助文本，printf 到第一条分割线为止。这样加了命令改一处就够。
-usage() { awk 'NR>1 && /^# ---/ { exit } NR>1 && /^#/ { sub(/^# ?/, ""); print }' "$SELF"; }
+# 英文的帮助是下面这份 heredoc：文件头那段改了，这里要跟着改
+usage() {
+  if [ -z "$EN" ]; then
+    awk 'NR>1 && /^# ---/ { exit } NR>1 && /^#/ { sub(/^# ?/, ""); print }' "$SELF"
+    return
+  fi
+  cat <<'EOF'
+rex: one command to start recording, one to stop. Microphone, system audio, or both together.
+
+  rex                 Record the microphone (run it again while recording = stop; handy to bind to one hotkey)
+  rex sys             Record system audio: podcasts, videos, anything playing in a web page
+  rex both            Microphone + system audio. One file: you hear the mix, and each source is also stored on its own track
+  rex both --split    Same, but saved as two files
+  rex stop            Stop
+  rex text            Transcribe the latest recording into text (whisper, fully local)
+                      A rex both recording becomes a dialogue transcript: "Me" = microphone, "Other" = system audio
+  rex text <file>     Transcribe the given audio file
+  rex phone           List iPhone Voice Memos (synced over via iCloud)
+  rex phone 1         Take memo 1, copy it into ~/Recordings/ and transcribe it
+  rex in              List transcribable audio/video files in ~/Downloads / ~/Desktop (where AirDrop puts them)
+  rex in 1 / rex in all   Transcribe one of them / all of them. Copies only; never touches the originals
+  rex url <link>      Download a podcast episode's audio (Xiaoyuzhou etc.) and transcribe it. Only uses the audio URL the page publishes
+  rex trim [file]     Cut the silence at the end (the part where you forgot to stop). The original goes to the Trash, not deleted
+  rex go [file]       End-to-end pipeline: transcribe → diarize → Claude proofreading (reports what it changed) → Claude analysis
+                      (leaves a session you can continue with claude --resume). No file = the latest recording
+  rex auto install    Watch ~/Recordings/收件箱 (the inbox): recordings dropped into it go through rex go automatically
+  rex auto [status|open|uninstall]     (rex inbox is an alias for rex in, not this)
+  rex login [status]  Sign in to a Claude account for rex go's proofreading and analysis (your terminal's claude settings are unaffected); status shows whether you are signed in
+  rex chat [file]     Continue the analysis session of that recording (no file = the latest one with an analysis)
+  rex app             Open the Recording Desk: a local web UI for recording, processing, confirming proofreading edits one by one, and follow-up questions
+  rex app stop|status|restart
+  rex who [file] [count]   Speaker diarization by voiceprint: multi-person conversations recorded on one microphone, rex both recordings made before 2026-10-11.
+                      Anything already transcribed isn't transcribed again; no file = the latest one. No count = detect it automatically
+  rex trim file --to 49:30   Set manually how far to keep
+  rex check           Record 3 s from the microphone and throw it away, only to see whether a signal really arrives (run this first if you suspect empty recordings;
+                      the first time, a microphone permission prompt appears: click Allow)
+  rex check sys       Play a test tone and record it through the system audio tap; if it arrives, make the tap the default for recording computer audio
+                      (doesn't change the output device, survives AirPods auto-switching; the first time, a "System Audio Recording Only" permission prompt appears: click Allow.
+                      If the tap doesn't work, the test tone is played once more over the old BlackHole route)
+  rex status          Recording? For how long? Is sound really coming in?
+  rex ls              The last ten recordings
+  rex find <word>     Search the transcripts and registered documents; no word = list all transcripts
+                      (extra document folders go in ~/.config/rex/text-dirs, one per line)
+  rex open            Open the recordings folder in Finder
+  rex devices         Which microphones and output devices there are, and which ones are the current defaults
+
+  --wav               Record 24-bit WAV (default AAC/m4a). Use it when the audio is going to be analyzed
+  --device "name"     Choose the microphone, e.g. --device "AirPods Pro"
+  --lang zh|en|auto   Transcription language, default auto
+  --no-vad            Turn off voice activity detection. It is on by default, to stop whisper from hallucinating on silence
+  --no-rename         Don't rename by keywords after transcribing; keep the timestamp name
+  --names Me,Teacher  What the two sides are called in the dialogue transcript (the first is the microphone side), default "Me,Other"
+  --who [count]       (text) Run voiceprint speaker diarization right after transcribing, same as rex who
+  --to 49:30          (trim) Keep only up to this time
+  --dry-run           (trim) Only report how much would be cut; don't touch the file
+
+  REX_WATCH=seconds   Interval of the watchdog's per-track checks, default 180; 0 turns them off (the cleanup when a recording stops by itself can't be turned off)
+  REX_NAMES=Me,Teacher   Default for --names
+  REX_MAX=seconds     Maximum recording length, default 21600 (6 hours)
+  REX_DIR=folder      Where recordings are saved, default ~/Recordings
+  REX_SYS=tap|blackhole   Which route records computer audio; temporarily overrides the result of rex check sys
+  REX_APP_PORT=port   Port of the Recording Desk, default 8790
+  REX_LANG=zh|en      Output language; defaults to your macOS language (or write it to ~/.config/rex/lang)
+
+Files always land in ~/Recordings/, named like 2026-08-16_143052_sys.m4a.
+Transcripts go right next to the audio: a .txt and an .srt with the same name.
+EOF
+}
 
 # ------------------------------------------------------------------ 入口
 
@@ -2479,7 +2589,7 @@ need ffprobe "brew install ffmpeg"
 sync_runtime
 
 WAV=""; SPLIT=""; MIC_DEV=""; LANG_OPT="auto"; NOVAD=""; NORENAME=""; TRIM_TO=""; DRY=""; POS=(); WHO=""; GO_INBOX=""
-NAMES="${REX_NAMES:-我,对方}"
+NAMES="${REX_NAMES:-$(L '我,对方' 'Me,Other')}"
 # rex --device X、rex --wav：选项直接跟在 rex 后面，就是默认命令（开关麦克风录音）带选项。
 # 以前这里把 --device 当成了命令名，报「不认识的命令」，手册却一直这么教人写
 CMD="${1:-}"
@@ -2498,7 +2608,7 @@ while [ $# -gt 0 ]; do
     --names)  shift; NAMES="${1:-}" ;;
     --who)    WHO=auto; case "${2:-}" in ''|*[!0-9]*) ;; *) WHO="$2"; shift ;; esac ;;
     --inbox)  GO_INBOX=1 ;;
-    -*)       die "不认识的参数：$1" ;;
+    -*)       dieL "不认识的参数：$1" "Unknown option: $1" ;;
     *)        POS+=( "$1" ) ;;
   esac
   shift
@@ -2508,7 +2618,7 @@ done
 NAMES=$(printf '%s' "$NAMES" | sed 's/，/,/g')
 case "$NAMES" in
   ?*,?*) NAME_A="${NAMES%%,*}"; NAME_B="${NAMES#*,}" ;;
-  *) die "--names 要两个名字、逗号隔开，比如 --names 我,老师（前一个是麦克风那边）" ;;
+  *) dieL "--names 要两个名字、逗号隔开，比如 --names 我,老师（前一个是麦克风那边）" "--names needs two names separated by a comma, e.g. --names Me,Teacher (the first is the microphone side)" ;;
 esac
 
 # 末尾的 exit 必须和 esac 写在同一行。bash 边读边执行：这个 case 跑完，它会回到文件里刚才的位置
@@ -2541,5 +2651,5 @@ case "$CMD" in
   open)             mkdir -p "$REX_DIR"; open "$REX_DIR" ;;
   devices|dev)      devices ;;
   help|-h|--help)   usage ;;
-  *) die "不认识的命令：${CMD}（跑 rex help）" ;;
+  *) dieL "不认识的命令：${CMD}（跑 rex help）" "Unknown command: ${CMD} (run rex help)" ;;
 esac; exit $?

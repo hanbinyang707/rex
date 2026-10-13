@@ -4,7 +4,7 @@
 
 A recorder for macOS that you start and stop with one command. It records your microphone, the computer's audio (calls, meetings, videos), or both. Transcription with whisper.cpp runs on your machine. Each transcript line is labeled with who said it. Optionally, Claude proofreads the transcript and writes an analysis. There is also a local web UI, the Recording Desk (录音台).
 
-> **Status**: a personal tool, open-sourced as it is. It only runs on macOS and is tested on macOS 26 with Apple Silicon. Command output, the web UI and code comments are currently in **Chinese**; the manual is in English and Chinese. See [Language](#language).
+> **Status**: a personal tool, open-sourced as it is. It only runs on macOS and is tested on macOS 26 with Apple Silicon. Command output and the web UI come in **English and Chinese**, following your macOS language. See [Language](#language).
 
 ## Why it exists
 
@@ -109,7 +109,9 @@ Code comments explain *why* (in Chinese). Most describe a real failure and how i
 
 ## Language
 
-The README and the manual ([English](docs/manual.md), [中文](docs/manual.zh-CN.md)) are bilingual. The command output, web UI and code comments are in Chinese; the manual reproduces output samples verbatim and explains them. English output is on the roadmap; contributions are welcome.
+rex speaks English and Chinese: command output, `rex help`, notifications, the Recording Desk web UI, report headings and the prompts it sends to Claude (so proofreading notes and analyses come back in your language). It follows your macOS language: Chinese → Chinese, anything else → English. Override it with `REX_LANG=en` or `REX_LANG=zh`, or put `en` or `zh` in `~/.config/rex/lang`.
+
+A few names stay the same in both languages because they are file formats: the inbox folder `~/Recordings/收件箱`, and the report files `.校对.md` (proofreading) and `.分析.md` (analysis). Code comments are in Chinese. The manual is in [English](docs/manual.md) and [中文](docs/manual.zh-CN.md).
 
 ## License
 

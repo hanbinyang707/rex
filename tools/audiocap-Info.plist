@@ -20,8 +20,8 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>rex 录你说的话（rex start、录音台的「我 + 对方」和「只录我」）。</string>
+	<string>rex 录你说的话（rex、rex both，录音台的「我 + 对方」和「只录我」）。/ rex records your voice (rex, rex both, and &quot;Me + other side&quot; / &quot;Only me&quot; in the Recording Desk).</string>
 	<key>NSAudioCaptureUsageDescription</key>
-	<string>rex 录电脑放出来的声音（通话里对方的声音），不改输出设备。</string>
+	<string>rex 录电脑放出来的声音（通话里对方的声音），不改输出设备。/ rex records the audio your Mac plays (the other side of a call) without changing the output device.</string>
 </dict>
 </plist>
