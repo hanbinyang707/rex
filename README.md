@@ -30,7 +30,7 @@ Every design decision here comes from a recording that failed without any error 
 | `rex who [file] [n]` | Speaker diarization (sherpa-onnx) for single-track multi-person recordings |
 | `rex go [file]` | Transcribe → speakers → Claude proofreading → Claude analysis |
 | `rex auto install` | Watch `~/Recordings/收件箱` (inbox) with launchd; anything dropped there goes through `rex go` |
-| `rex app` | Recording Desk web UI at `http://127.0.0.1:8790`: record, review corrections (Y/N), ask follow-up questions, search, double-click a recording to move it to the Trash |
+| `rex app` | Recording Desk web UI at `http://127.0.0.1:8790`: record, review corrections (Y/N, or accept all at once), ask follow-up questions, search, double-click a recording to move it to the Trash |
 | `rex phone` | Import iPhone Voice Memos synced through iCloud |
 | `rex url <link>` | Download a podcast episode's audio and transcribe it |
 | `rex find <word>` | Search all transcripts |

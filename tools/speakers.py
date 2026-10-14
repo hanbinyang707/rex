@@ -131,7 +131,8 @@ def clock(x):
 def read_srt(path):
     if not path or not os.path.exists(path):
         return []
-    text = open(path, "rb").read().decode("utf-8", "replace")
+    with open(path, "rb") as fh:
+        text = fh.read().decode("utf-8", "replace")
     out = []
     for blk in re.split(r"\n\s*\n", text.strip()):
         lines = blk.strip().split("\n")

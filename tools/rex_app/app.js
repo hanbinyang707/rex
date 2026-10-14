@@ -369,8 +369,10 @@ function paneProof(r) {
   if (p.unsure.length) {
     S.focus = Math.min(S.focus, p.unsure.length - 1);
     h += T(`<div class="h3">待你确认 <small>${p.unsure.length} 处 · Claude 拿不准，稿子里还是原文</small>
+      <button class="acceptall" data-act="acceptall" title="剩下的建议一次全部采纳；之后每一条都还能在「改了的」里单独撤销">全部采纳（${p.unsure.length}）</button>
       <span class="keys"><kbd>Y</kbd> 采纳 <kbd>N</kbd> 不采纳 <kbd>J</kbd>/<kbd>K</kbd> 上下 <kbd>空格</kbd> 听这一句</span></div>`,
     `<div class="h3">To confirm <small>${p.unsure.length} · Claude is uncertain; the transcript still has the original</small>
+      <button class="acceptall" data-act="acceptall" title="Accept all remaining suggestions at once; you can still undo each one under “Corrected”">Accept all (${p.unsure.length})</button>
       <span class="keys"><kbd>Y</kbd> Accept <kbd>N</kbd> Reject <kbd>J</kbd>/<kbd>K</kbd> Next/previous <kbd>Space</kbd> Play this line</span></div>`);
     h += p.unsure.map((x, i) => `
       <div class="card ${i === S.focus ? 'focus' : ''}" id="C${i}" data-i="${i}">
@@ -542,6 +544,20 @@ async function trashRec(key) {
   refresh();
 }
 
+// 「全部采纳」：剩下的建议一次收下。先问一句；原文找不到、或者在那一行出现不止一次的，服务端会跳过、留在待确认里
+async function acceptAll() {
+  const n = pending().length;
+  if (!n) return;
+  if (!confirm(T(`把剩下的 ${n} 条建议全部采纳？\n\n稿子会照着改。之后在「改了的」里，每一条都还能单独撤销。`,
+                 `Accept all ${n} remaining suggestions?\n\nThe transcript will be changed accordingly. You can still undo each one under “Corrected”.`))) return;
+  const j = await api('/api/decide_all', { key: S.sel, action: 'accept' });
+  toast(j.msg, j.ok ? (j.skipped ? '' : 'ok') : 'bad', j.ok ? 7000 : 5000);
+  if (!j.ok && !j.done) return;
+  S.focus = 0;
+  await loadDetail(S.sel, true);
+  refresh();
+}
+
 async function decide(rid, action) {
   const j = await api('/api/decide', { key: S.sel, rid: Number(rid), action });
   if (!j.ok) { toast(j.msg, 'bad'); return; }
@@ -658,6 +674,7 @@ document.addEventListener('click', e => {
   if (act && act.dataset.act === 'go') { api('/api/go', { key: S.sel }).then(j => { toast(j.msg, j.ok ? 'ok' : 'bad'); refresh(); }); return; }
   if (act && act.dataset.act === 'reveal') { api('/api/reveal', { key: S.sel }); return; }
   if (act && act.dataset.act === 'trash') { trashRec(S.sel); return; }
+  if (act && act.dataset.act === 'acceptall') { acceptAll(); return; }
   const tr = e.target.closest('[data-track]');
   if (tr) { const a = player(); a.dataset.i = tr.dataset.track; const t0 = a.currentTime; a.src = `/media?k=${encodeURIComponent(S.sel)}&i=${tr.dataset.track}`; a.addEventListener('loadedmetadata', () => { a.currentTime = t0; }, { once: true }); return; }
   const rb = e.target.closest('.recbtn');

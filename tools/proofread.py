@@ -499,6 +499,60 @@ def decide(prefix, rid, action):
         return _decide(prefix, rid, action)
 
 
+def _shift(state, eid, at, span, delta, skip=None):
+    """同一行里在 at 处把 span 个字换成了别的（长度变了 delta）：这一行里排在它后面的、已经改过的那些条目，
+    记下的位置跟着挪。不挪的话，同一行连着采纳几条之后，先采纳的那条撤销时位置对不上，只能退回按文字找。"""
+    if not delta:
+        return
+    for r in state["applied"]:
+        if r is not skip and r.get("id") == eid and r.get("pos") is not None and r["pos"] >= at + span:
+            r["pos"] += delta
+
+
+def decide_all(prefix, action="accept"):
+    """「全部采纳」：把还在「拿不准」里的建议一次采纳。同一把锁里一条条改、最后只写一次文件。
+    原文找不到了、或者在那一行出现不止一次的跳过，留在「拿不准」里（和逐条点「采纳」的判据一样）。
+    返回 (成没成, 说明, 采纳了几条, 跳过几条)。"""
+    with locked(prefix):
+        entries = read_entries(prefix)
+        labeled = has_labels(entries)
+        state = load_state(prefix, entries)
+        if not state:
+            return False, L("这条录音还没有校对报告", "This recording has no proofreading report yet"), 0, 0
+        if action != "accept":
+            return False, L("这个操作不支持", "That action isn't supported"), 0, 0
+        if not state["unsure"]:
+            return False, L("没有待确认的了", "Nothing left to confirm"), 0, 0
+        done = skipped = 0
+        for row in sorted(state["unsure"], key=lambda r: (r.get("id") or 0, r["t"])):
+            e = find_entry(entries, row, row["old"])
+            if not e or locate(split_label(e["text"], labeled)[1], row["old"]) < 0:
+                skipped += 1
+                continue
+            pos = replace_in(e, row["old"], row["new"], labeled=labeled)
+            if pos is None:
+                skipped += 1
+                continue
+            _shift(state, e["id"], pos, len(row["old"]), len(row["new"]) - len(row["old"]))
+            state["unsure"].remove(row)
+            state["applied"].append(dict(row, id=e["id"], t=e["a"], by="你", pos=pos))
+            done += 1
+        if not done:
+            return False, L("一条都没能自动采纳：原文都找不到了，或者在那一行出现不止一次。请逐条看",
+                            "None could be accepted automatically: the original text is gone or appears more than "
+                            "once in its line. Please go through them one by one"), 0, skipped
+        write_transcript(prefix, entries)
+        state["applied"].sort(key=lambda r: r["t"])
+        save_state(prefix, state)
+        if skipped:
+            msg = L("采纳了 %d 条。%d 条没法自动改（原文找不到了，或者在那一行出现不止一次），还留在待确认里" % (done, skipped),
+                    "Accepted %d. %d couldn't be applied automatically (the original text is gone or appears more "
+                    "than once in its line) and are still waiting for you" % (done, skipped))
+        else:
+            msg = L("采纳了 %d 条，稿子已经照着改好" % done, "Accepted %d; the transcript has been updated" % done)
+        return True, msg, done, skipped
+
+
 def _decide(prefix, rid, action):
     entries = read_entries(prefix)
     labeled = has_labels(entries)
@@ -523,6 +577,7 @@ def _decide(prefix, rid, action):
         if pos is None:
             return False, L("稿子里找不到原文「%s」了，可能已经改过",
                             "“%s” is no longer in the transcript; it may have been changed already") % row["old"]
+        _shift(state, e["id"], pos, len(row["old"]), len(row["new"]) - len(row["old"]))
         state[kind].remove(row)
         state["applied"].append(dict(row, id=e["id"], t=e["a"], by="你", pos=pos))
     elif action == "reject" and kind == "unsure":
@@ -543,6 +598,7 @@ def _decide(prefix, rid, action):
             return False, L("稿子里「%s」的位置对不上了（这一行后来又改过？），没法自动撤销，请你直接改稿子",
                             "“%s” is no longer where it was in the transcript (was the line edited since?), so it "
                             "can't be undone automatically; please edit the transcript directly") % row["new"]
+        _shift(state, e["id"], pos, len(row["new"]), len(row["old"]) - len(row["new"]), skip=row)
         state["applied"].remove(row)
         state["rejected"].append(dict(row, id=e["id"], t=e["a"], by="你撤销"))
     else:

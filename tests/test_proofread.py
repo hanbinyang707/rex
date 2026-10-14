@@ -109,5 +109,79 @@ class Decide(unittest.TestCase):
         self.assertIn("不止一次", msg)
 
 
+class DecideAll(unittest.TestCase):
+    """「全部采纳」：一次收下剩下的建议；同一行连着改几处，之后每一条都能精确撤销。"""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.prefix = os.path.join(self.dir, "t")
+        with open(self.prefix + ".srt", "w", encoding="utf-8") as fh:
+            fh.write("1\n00:00:00,000 --> 00:00:01,000\n我：起中考试和真本的安排\n\n"
+                     "2\n00:00:01,000 --> 00:00:02,000\n对方：中间的中间\n\n")
+        st = pf.new_state()
+        row = lambda i, t, old, new: {"id": i, "t": t, "who": "", "old": old, "new": new, "why": "", "by": ""}
+        pf.add_row(st, "unsure", row(1, 0.0, "起中", "期中"))       # 同一行两条：前一条长度不变
+        pf.add_row(st, "unsure", row(1, 0.0, "真本", "真格基金"))   # 后一条变长
+        pf.add_row(st, "unsure", row(2, 1.0, "中间", "终点"))       # 在那一行出现两次：跳过
+        pf.add_row(st, "unsure", row(2, 1.0, "不存在", "x"))        # 原文找不到：跳过
+        pf.save_state(self.prefix, st)
+
+    def tearDown(self):
+        shutil.rmtree(self.dir)
+
+    def srt(self):
+        with open(self.prefix + ".srt", encoding="utf-8") as fh:
+            return fh.read()
+
+    def state(self):
+        with open(self.prefix + ".校对.json", encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_accepts_what_it_can_and_keeps_the_rest(self):
+        ok, msg, done, skipped = pf.decide_all(self.prefix)
+        self.assertTrue(ok, msg)
+        self.assertEqual((done, skipped), (2, 2))
+        self.assertIn("期中考试和真格基金的安排", self.srt())
+        self.assertIn("中间的中间", self.srt())
+        st = self.state()
+        self.assertEqual(sorted(r["old"] for r in st["unsure"]), ["不存在", "中间"])
+        self.assertTrue(all(r["by"] == "你" for r in st["applied"]))
+
+    def test_every_accepted_item_undoes_exactly(self):
+        pf.decide_all(self.prefix)
+        rids = {r["old"]: r["rid"] for r in self.state()["applied"]}
+        self.assertTrue(pf.decide(self.prefix, rids["起中"], "undo")[0])     # 先撤前面那条：后面那条的位置要跟着挪
+        self.assertIn("起中考试和真格基金的安排", self.srt())
+        self.assertTrue(pf.decide(self.prefix, rids["真本"], "undo")[0])
+        self.assertIn("起中考试和真本的安排", self.srt())
+
+    def test_undo_needs_the_shifted_position(self):
+        # 「甲乙和丙丁」两处都改成「好」，改完是「好和好」：按文字找「好」有两处，只有挪对了的位置能撤销对
+        prefix = os.path.join(self.dir, "u")
+        with open(prefix + ".srt", "w", encoding="utf-8") as fh:
+            fh.write("1\n00:00:00,000 --> 00:00:01,000\n甲乙和丙丁\n\n")
+        st = pf.new_state()
+        late = pf.add_row(st, "unsure", {"id": 1, "t": 0.0, "who": "", "old": "丙丁", "new": "好", "why": "", "by": ""})
+        early = pf.add_row(st, "unsure", {"id": 1, "t": 0.0, "who": "", "old": "甲乙", "new": "好", "why": "", "by": ""})
+        pf.save_state(prefix, st)
+        self.assertTrue(pf.decide(prefix, late["rid"], "accept")[0])     # 先改后面的
+        self.assertTrue(pf.decide(prefix, early["rid"], "accept")[0])    # 再改前面的：后面那条的位置 3 → 2
+        read = lambda: open(prefix + ".srt", encoding="utf-8").read()
+        self.assertIn("好和好", read())
+        self.assertTrue(pf.decide(prefix, late["rid"], "undo")[0])
+        self.assertIn("好和丙丁", read())
+        self.assertTrue(pf.decide(prefix, early["rid"], "undo")[0])
+        self.assertIn("甲乙和丙丁", read())
+
+    def test_nothing_pending(self):
+        pf.decide_all(self.prefix)
+        st = self.state()
+        st["unsure"] = []
+        pf.save_state(self.prefix, st)
+        ok, msg, done, skipped = pf.decide_all(self.prefix)
+        self.assertFalse(ok)
+        self.assertEqual(done, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

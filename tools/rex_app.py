@@ -865,6 +865,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             key = data.get("key", "")
             if key and "/" in key:
                 return self.send_json({"ok": False, "msg": L("名字不对", "Invalid name")}, 400)
+            if u.path == "/api/decide_all":
+                if JOBS.busy(key):
+                    return self.send_json({"ok": False, "msg": L("这条正在处理，等它跑完再改",
+                                                                 "This one is being processed. Wait for it to finish, "
+                                                                 "then edit")})
+                ok, msg, done, skipped = proofread.decide_all(os.path.join(REX_DIR, key), data.get("action", "accept"))
+                return self.send_json({"ok": ok, "msg": msg, "done": done, "skipped": skipped})
             if u.path == "/api/decide":
                 if JOBS.busy(key):
                     return self.send_json({"ok": False, "msg": L("这条正在处理，等它跑完再改",
