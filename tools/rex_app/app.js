@@ -303,7 +303,7 @@ function renderDetail() {
   el.dataset.key = r.key;
   el.innerHTML = `
     <div class="dhead">
-      <div class="dtitle"><h2>${esc(r.title)}</h2><span id="dact">${action}</span><button class="ghost" data-act="reveal" title="${T('在访达中显示', 'Show in Finder')}">${T('访达', 'Finder')}</button><button class="ghost" data-act="trash" title="${T('移到废纸篓（双击左边列表里的这一条也行）', 'Move to the Trash (or double-click it in the list on the left)')}">${T('删除', 'Delete')}</button></div>
+      <div class="dtitle"><h2>${esc(r.title)}</h2><span id="dact">${action}</span><button class="ghost" data-act="reveal" title="${T('在访达中显示', 'Show in Finder')}">${T('访达', 'Finder')}</button><button class="ghost" data-act="export-docx" title="${T('把稿子下载成 Word', 'Download the transcript as Word')}">Word</button><button class="ghost" data-act="export-srt" title="${T('下载字幕（.srt，带名字、校对过）', 'Download subtitles (.srt, with names, proofread)')}">${T('字幕', 'Subtitles')}</button><button class="ghost" data-act="trash" title="${T('移到废纸篓（双击左边列表里的这一条也行）', 'Move to the Trash (or double-click it in the list on the left)')}">${T('删除', 'Delete')}</button></div>
       <div class="dmeta">${esc(meta)}</div>
       ${r.audio.length ? `<audio id="player" controls preload="metadata" data-key="${esc(r.key)}" data-i="0" src="/media?k=${encodeURIComponent(r.key)}&i=0"></audio>
         ${r.audio.length > 1 ? `<div class="tracks">${T('分轨录音：', 'Separate tracks: ')}${r.audio.map((a, i) => `<button class="ghost" data-track="${i}">${/-sys/.test(a) ? T('电脑声音那轨', 'Computer audio track') : T('麦克风那轨', 'Microphone track')}</button>`).join('')}</div>` : ''}` : `<div class="muted">${T('没有音频文件', 'No audio file')}</div>`}
@@ -545,6 +545,26 @@ async function trashRec(key) {
 }
 
 // 「全部采纳」：剩下的建议一次收下。先问一句；原文找不到、或者在那一行出现不止一次的，服务端会跳过、留在待确认里
+// 下载 Word / 字幕。先取回来再存：直接跳到下载地址的话，没有稿子时整页会换成一段报错
+async function exportRec(fmt) {
+  const key = S.sel;
+  if (!key) return;
+  let r;
+  try { r = await fetch('/api/export?fmt=' + fmt + '&k=' + encodeURIComponent(key)); } catch (e) {
+    toast(T('连不上录音台服务（rex app 关了？）', "Can't reach the Recording Desk server (is rex app stopped?)"), 'bad'); return;
+  }
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    toast(j.msg || ('HTTP ' + r.status), 'bad'); return;
+  }
+  const url = URL.createObjectURL(await r.blob());
+  const a = document.createElement('a');
+  a.href = url; a.download = key + '.' + fmt;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  if (fmt === 'docx') toast(T('Word 也存了一份在录音旁边', 'A copy of the Word file is also saved next to the recording'), 'ok');
+}
+
 async function acceptAll() {
   const n = pending().length;
   if (!n) return;
@@ -673,6 +693,7 @@ document.addEventListener('click', e => {
   const act = e.target.closest('[data-act]');
   if (act && act.dataset.act === 'go') { api('/api/go', { key: S.sel }).then(j => { toast(j.msg, j.ok ? 'ok' : 'bad'); refresh(); }); return; }
   if (act && act.dataset.act === 'reveal') { api('/api/reveal', { key: S.sel }); return; }
+  if (act && (act.dataset.act === 'export-docx' || act.dataset.act === 'export-srt')) { exportRec(act.dataset.act.slice(7)); return; }
   if (act && act.dataset.act === 'trash') { trashRec(S.sel); return; }
   if (act && act.dataset.act === 'acceptall') { acceptAll(); return; }
   const tr = e.target.closest('[data-track]');

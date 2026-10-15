@@ -23,6 +23,9 @@
 #   rex chat [文件]     接着和那条录音的分析会话聊（不给就是最近一条有分析的）
 #   rex app             打开录音台：本地网页界面，录音、处理、逐条确认校对、接着问都在里面
 #   rex app stop|status|restart
+#   rex link            用手机录：开 tailscale serve、打二维码，手机扫码就能录，边录边传回来走 rex go
+#   rex link stop|status|new-token
+#   rex export [文件] [docx|srt]   把稿子导出成 Word（写在录音旁边）或给出字幕文件；不给文件就是最近一条
 #   rex who [文件] [人数]   按声纹分人：一个麦克风录的多人谈话、2026-10-11 之前的 rex both。
 #                       已经转写过的不重转；不给文件就是最近一条。人数不给就自动判
 #   rex trim 文件 --to 49:30   手动指定只保留到哪里
@@ -54,6 +57,7 @@
 #   REX_DIR=目录        录音存哪，默认 ~/Recordings
 #   REX_SYS=tap|blackhole   录电脑声音走哪条路，临时覆盖 rex check sys 的结果
 #   REX_APP_PORT=端口   录音台的端口，默认 8790
+#   REX_LINK_PORT=端口  手机录音服务的本机端口，默认 8791；REX_LINK_HTTPS 是 tailscale serve 的端口，默认 8443
 #   REX_LANG=zh|en      输出语言，默认跟 macOS 的首选语言（也可以写进 ~/.config/rex/lang）
 #
 # 文件一律落在 ~/Recordings/，名字形如 2026-08-16_143052_sys.m4a。
@@ -2513,6 +2517,149 @@ devices() {
   sayL "${C_D}→ 是现在的默认。rex mic 跟随默认麦克风；rex sys 会按默认输出现建直通设备。${C_0}" "${C_D}→ marks the current default. rex mic follows the default microphone; rex sys builds a passthrough device from the default output on the fly.${C_0}"
 }
 
+# ------------------------------------------------------------------ 导出（rex export）
+# Word 由 rex_export.py 现做（写在录音旁边）；字幕就是一路写好、校对过的 <前缀>.srt，不另做一份。
+export_cmd() {
+  fmt=docx; target=""
+  for a in "$@"; do
+    case "$a" in docx|srt) fmt="$a" ;; *) target="$a" ;; esac
+  done
+  if [ -z "$target" ]; then
+    target=$(ls -1t "$REX_DIR"/*.txt 2>/dev/null | grep -v '\.whisper\.' | head -1)
+    [ -n "$target" ] || dieL "$REX_DIR 里还没有稿子。先 rex text 或 rex go。" "No transcripts in $REX_DIR yet. Run rex text or rex go first."
+  fi
+  out=$(python3 "$TOOLS_DIR/rex_export.py" "$target" "$fmt") || dieL "$out" "$out"
+  sayL "导出了：${C_G}${out}${C_0}" "Exported: ${C_G}${out}${C_0}"
+  open -R "$out" 2>/dev/null || true
+}
+
+# ------------------------------------------------------------------ 用手机录（rex link）
+# 手机浏览器只在 https 下给麦克风，所以经 tailscale serve：只在你自己的 tailnet 里能访问、带正式证书。
+# 服务本身（rex_link.py）只听 127.0.0.1，能做的只有收录音、收文件、看最近的稿子、下载稿子，见它的文件头。
+LINK_PORT="${REX_LINK_PORT:-8791}"
+LINK_HTTPS="${REX_LINK_HTTPS:-8443}"
+LINK_PID="$HOME/.cache/rex/link.pid"
+LINK_LOG="${REX_LINK_LOG:-$HOME/Library/Logs/rex-link.log}"
+
+ts_cli() {
+  if command -v tailscale >/dev/null 2>&1; then command -v tailscale; return 0; fi
+  for c in /Applications/Tailscale.app/Contents/MacOS/Tailscale /opt/homebrew/bin/tailscale /usr/local/bin/tailscale; do
+    [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+  done
+  return 1
+}
+link_up() {   # 端口上答应的是手机录音服务吗（别把别的服务当成它）
+  case "$(curl -s --max-time 2 "http://127.0.0.1:$LINK_PORT/healthz" 2>/dev/null)" in *'"rex-link"'*) return 0 ;; *) return 1 ;; esac
+}
+# 和 app_pid 一样：先看起它时记下的，没有就看端口上监听的是谁，都要核对命令行确实是 rex_link.py。只按确切的 PID 停
+link_pid() {
+  p=$(cat "$LINK_PID" 2>/dev/null)
+  if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+    case "$(ps -o command= -p "$p" 2>/dev/null)" in *rex_link.py*) printf '%s' "$p"; return 0 ;; esac
+  fi
+  for p in $(lsof -nP -iTCP:"$LINK_PORT" -sTCP:LISTEN -t 2>/dev/null); do
+    case "$(ps -o command= -p "$p" 2>/dev/null)" in *rex_link.py*) printf '%s' "$p"; return 0 ;; esac
+  done
+  return 1
+}
+
+# tailscale serve 那边，这个 https 端口现在是什么：ours（只转到这里）/ funnel（转到这里，但开着 Funnel，对公网）/
+# other（别的服务占着，不去动它）/ none（没配）
+link_serve_state() {
+  "$1" serve status --json 2>/dev/null | python3 -c '
+import json, sys
+port, target = sys.argv[1], "http://127.0.0.1:%s" % sys.argv[2]
+try:
+    sc = json.loads(sys.stdin.read() or "{}") or {}
+except ValueError:
+    sc = {}
+on_port = lambda hp: hp.rsplit(":", 1)[-1] == port
+web = [w or {} for hp, w in (sc.get("Web") or {}).items() if on_port(hp)]
+tcp = (sc.get("TCP") or {}).get(port)
+if not tcp and not web:
+    print("none")
+elif not (tcp and tcp.get("HTTPS") and web and all(
+        list(w.get("Handlers") or {}) == ["/"] and (w["Handlers"]["/"].get("Proxy") or "").rstrip("/") == target
+        for w in web)):
+    print("other")
+elif any(v and on_port(hp) for hp, v in (sc.get("AllowFunnel") or {}).items()):
+    print("funnel")
+else:
+    print("ours")
+' "$LINK_HTTPS" "$LINK_PORT"
+}
+
+link_url() {
+  ts="$1"
+  host=$("$ts" status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null)
+  [ -n "$host" ] || return 1
+  tok=$(python3 "$TOOLS_DIR/rex_link.py" --token)
+  printf 'https://%s:%s/?t=%s\n' "$host" "$LINK_HTTPS" "$tok"
+}
+
+link_cmd() {
+  case "${1:-open}" in
+    open|start)
+      ts=$(ts_cli) || dieL "没找到 Tailscale。手机录音要经 Tailscale：装好 Tailscale、手机和这台 Mac 登同一个账号，再跑 rex link。" "Tailscale not found. Phone recording goes through Tailscale: install it, sign in on both the phone and this Mac with the same account, then run rex link again."
+      if ! link_up; then
+        mkdir -p "$(dirname "$LINK_LOG")" "$(dirname "$LINK_PID")" "$REX_DIR"
+        REX_DIR="$REX_DIR" REX_LINK_PORT="$LINK_PORT" nohup python3 "$TOOLS_DIR/rex_link.py" >> "$LINK_LOG" 2>&1 &
+        echo $! > "$LINK_PID"
+        for _ in 1 2 3 4 5 6 7 8 9 10; do link_up && break; sleep 0.5; done
+        link_up || dieL "手机录音服务没起来，看日志：${LINK_LOG}（端口 ${LINK_PORT} 被占了就用 REX_LINK_PORT 换一个）" "The phone recording service did not start; see ${LINK_LOG} (if port ${LINK_PORT} is taken, choose another with REX_LINK_PORT)"
+      fi
+      case "$(link_serve_state "$ts")" in
+        ours) ;;
+        other) dieL "Tailscale 的 ${LINK_HTTPS} 端口已经被别的服务用着（tailscale serve status 能看到），rex link 不去动它。换一个端口：REX_LINK_HTTPS=8444 rex link" "Port ${LINK_HTTPS} in Tailscale is already used by another service (see tailscale serve status); rex link leaves it alone. Use another port: REX_LINK_HTTPS=8444 rex link" ;;
+        *)
+          # 不截它的输出：tailnet 还没开 HTTPS 证书时，它在这里打出开通的链接，有时还会等你开好再往下走。
+          # 它的退出码也不可信（打完链接就退出 0），所以开没开成，回头看 serve status
+          "$ts" serve --bg --https="$LINK_HTTPS" "http://127.0.0.1:$LINK_PORT" || true
+          case "$(link_serve_state "$ts")" in
+            ours) ;;
+            funnel)
+              "$ts" serve --https="$LINK_HTTPS" off >/dev/null 2>&1
+              dieL "这个端口开着 Funnel（对公网开放），rex link 不能这样用，已经把它关了。再跑一次 rex link。" "Funnel (public internet) is on for this port; rex link must not run that way, so it has been turned off. Run rex link again." ;;
+            *) dieL "tailscale serve 没开成。最常见的原因：tailnet 还没开 HTTPS 证书——去 https://login.tailscale.com/admin/dns 打开 MagicDNS 和 HTTPS Certificates（上面 tailscale 打出的链接也行），再跑一次 rex link。" "tailscale serve failed. Most often HTTPS certificates are not enabled for the tailnet: open https://login.tailscale.com/admin/dns and turn on MagicDNS and HTTPS Certificates (or use the link tailscale printed above), then run rex link again." ;;
+          esac ;;
+      esac
+      url=$(link_url "$ts") || dieL "读不到这台 Mac 在 tailnet 里的名字（tailscale status 没登录？）" "Could not read this Mac's name in the tailnet (is tailscale signed in?)"
+      say ""
+      if command -v qrencode >/dev/null 2>&1; then
+        qrencode -t ANSIUTF8 -m 2 "$url"
+      else
+        sayL "  ${C_D}（装了 qrencode 这里会打出二维码：brew install qrencode）${C_0}" "  ${C_D}(install qrencode to get a QR code here: brew install qrencode)${C_0}"
+      fi
+      sayL "手机打开：${C_G}${url}${C_0}" "Open on your phone: ${C_G}${url}${C_0}"
+      sayL "  ${C_D}只有登着同一个 Tailscale 账号的设备能打开。录完自动进收件箱、走 rex go。关掉：rex link stop${C_0}" "  ${C_D}Only devices signed in to the same Tailscale account can open it. Recordings go into the inbox and through rex go. To close: rex link stop${C_0}"
+      sayL "  ${C_D}地址被别人看到了：rex link new-token 换口令，旧二维码作废${C_0}" "  ${C_D}If someone else saw the address: rex link new-token makes old QR codes stop working${C_0}"
+      ;;
+    stop)
+      if ts=$(ts_cli); then      # 只撤自己配的那个端口；别的服务占着的不动
+        case "$(link_serve_state "$ts")" in ours|funnel) "$ts" serve --https="$LINK_HTTPS" off >/dev/null 2>&1 ;; esac
+      fi
+      if p=$(link_pid); then
+        kill "$p" 2>/dev/null
+        for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$p" 2>/dev/null || break; sleep 0.3; done
+        kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null
+        rm -f "$LINK_PID"; sayL "手机录音关了（tailscale serve 那个端口也撤了）。" "Phone recording stopped (the tailscale serve port is closed too)."
+      else rm -f "$LINK_PID"; sayL "手机录音本来就没开。" "Phone recording was not running."; fi
+      ;;
+    new-token|rotate)
+      python3 "$TOOLS_DIR/rex_link.py" --new-token >/dev/null
+      sayL "换了新口令，旧二维码作废。重跑 rex link 拿新的。" "New token made; old QR codes no longer work. Run rex link again for a new one."
+      ;;
+    status|*)
+      if link_up; then sayL "${C_G}● 开着${C_0}  日志 $LINK_LOG" "${C_G}● Running${C_0}  log $LINK_LOG"
+        if ts=$(ts_cli) && [ "$(link_serve_state "$ts")" = ours ] && url=$(link_url "$ts"); then
+          sayL "  手机打开：$url" "  Open on your phone: $url"
+        else
+          sayL "  ${C_Y}tailscale serve 没在转发，手机连不上：再跑一次 rex link${C_0}" "  ${C_Y}tailscale serve is not forwarding, so the phone cannot connect: run rex link again${C_0}"
+        fi
+      else sayL "○ 没开（打开：rex link）" "○ Not running (start it: rex link)"; fi ;;
+  esac
+}
+
 # 用头部注释当帮助文本，printf 到第一条分割线为止。这样加了命令改一处就够。
 # 英文的帮助是下面这份 heredoc：文件头那段改了，这里要跟着改
 usage() {
@@ -2545,6 +2692,9 @@ rex: one command to start recording, one to stop. Microphone, system audio, or b
   rex chat [file]     Continue the analysis session of that recording (no file = the latest one with an analysis)
   rex app             Open the Recording Desk: a local web UI for recording, processing, confirming proofreading edits one by one, and follow-up questions
   rex app stop|status|restart
+  rex link            Record from your phone: starts tailscale serve and prints a QR code; scan it, record, and the audio streams back here and goes through rex go
+  rex link stop|status|new-token
+  rex export [file] [docx|srt]   Export the transcript as Word (written next to the recording) or give the subtitle file; no file = the latest one
   rex who [file] [count]   Speaker diarization by voiceprint: multi-person conversations recorded on one microphone, rex both recordings made before 2026-10-11.
                       Anything already transcribed isn't transcribed again; no file = the latest one. No count = detect it automatically
   rex trim file --to 49:30   Set manually how far to keep
@@ -2576,6 +2726,7 @@ rex: one command to start recording, one to stop. Microphone, system audio, or b
   REX_DIR=folder      Where recordings are saved, default ~/Recordings
   REX_SYS=tap|blackhole   Which route records computer audio; temporarily overrides the result of rex check sys
   REX_APP_PORT=port   Port of the Recording Desk, default 8790
+  REX_LINK_PORT=port  Local port of the phone recording service, default 8791; REX_LINK_HTTPS is the tailscale serve port, default 8443
   REX_LANG=zh|en      Output language; defaults to your macOS language (or write it to ~/.config/rex/lang)
 
 Files always land in ~/Recordings/, named like 2026-08-16_143052_sys.m4a.
@@ -2646,6 +2797,8 @@ case "$CMD" in
   login)            login_cmd ${POS[@]+"${POS[@]}"} ;;
   chat)             chat_cmd ${POS[@]+"${POS[@]}"} ;;
   app)              app_cmd ${POS[@]+"${POS[@]}"} ;;
+  link|mobile)      link_cmd ${POS[@]+"${POS[@]}"} ;;
+  export|x)         export_cmd ${POS[@]+"${POS[@]}"} ;;
   status|st)        status ;;
   ls|list)          list ;;
   find|f|search)    find_cmd ${POS[@]+"${POS[@]}"} ;;

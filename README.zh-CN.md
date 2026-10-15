@@ -38,6 +38,8 @@ macOS 上一行命令开始、一行命令结束的录音器：录麦克风、�
 | `rex go [文件]` | 一条龙：转写 → 分人 → Claude 校对 → Claude 分析 |
 | `rex auto install` | launchd 盯着 `~/Recordings/收件箱`，丢进去的录音自动走 `rex go` |
 | `rex app` | 录音台网页界面 `http://127.0.0.1:8790`：录音、确认校对（逐条 Y/N，或一键全部采纳）、接着问、搜索、双击一条移到废纸篓 |
+| `rex link` | **用手机录**：打一个二维码，手机浏览器扫开就能录，边录边传回 Mac、自动走 `rex go`（经 Tailscale，只有你自己的设备连得上） |
+| `rex export [文件] [docx\|srt]` | 把稿子导出成 Word，或拿到字幕文件；录音台和手机页上也有这两个按钮 |
 | `rex phone` | 取 iCloud 同步过来的 iPhone 语音备忘录 |
 | `rex url <链接>` | 下载播客单集音频并转写 |
 | `rex find <词>` | 搜所有稿子 |
@@ -92,6 +94,8 @@ rex app       # 打开录音台
 - 只有 `rex go` 和录音台的「接着问」会把稿子发出去：经你本机 `claude` 命令行的登录发给 Anthropic。rex 会先
   清掉 `ANTHROPIC_*` 环境变量，免得终端里把 `claude` 指到了别家接口、稿子被发到那边。想沿用：`REX_CLAUDE_ENV=inherit`。
 - 录音台只监听 `127.0.0.1`，核对 Host 头、每次启动换的 cookie 口令和请求来源。
+- `rex link` 的手机服务是另一个进程，也只听 `127.0.0.1`，经 `tailscale serve` 只对你自己的 tailnet 开放（不用 Funnel，不上公网）。
+  它只能收录音、收文件、列最近的稿子、下载稿子；不能删、不能改、不能开录、不能发给 Claude。口令在二维码里，`rex link new-token` 换掉。
 - **录别人之前先说一声**：各地法律不同（一方同意 / 各方同意）。
 
 ## 语言
@@ -111,6 +115,8 @@ rex app       # 打开录音台
 | `tools/speakers.py`、`tools/diarize.py` | 两轨合成对话稿（去回声）；声纹分人 |
 | `tools/proofread.py`、`tools/analyze.py`、`tools/claude_cli.py` | Claude 校对（只收修改清单、逐字替换）和分析 |
 | `tools/rex_app.py`、`tools/rex_app/` | 录音台网页界面 |
+| `tools/rex_link.py`、`tools/rex_link/` | 用手机录（`rex link`）的服务和页面 |
+| `tools/rex_export.py` | 导出 Word / 字幕 |
 | `tools/whisper-prompt.txt`、`tools/whisper-fix.txt` | 词表和确定性替换的模板：拷到 `~/.config/rex/` 下再改 |
 | `docs/manual.zh-CN.md`、`docs/manual.md` | 完整手册（中文、英文） |
 

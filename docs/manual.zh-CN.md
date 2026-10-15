@@ -28,6 +28,9 @@
 | `rex app stop` / `rex app status` / `rex app restart` | 关掉 / 看开着没有 / 重起 |
 | `rex text` | 把最近一次录音转写成文字。`rex both` 录的出**对话稿**：谁、几点、说了什么 |
 | `rex text 某文件` | 转写指定的音频文件（任何 ffmpeg 认识的格式） |
+| `rex link` | **用手机录**：打出一个二维码，手机浏览器扫开就能录，声音边录边传回来、走 `rex go`（见第六节） |
+| `rex link stop` / `rex link status` / `rex link new-token` | 关掉 / 看状态和地址 / 换一个新口令（旧二维码就失效了） |
+| `rex export [文件] [docx\|srt]` | 把稿子导出成 Word，或者拿它的字幕文件；不给文件就是最近一条（见第五节「导出」） |
 | `rex phone` | 列出 iPhone 语音备忘录（iCloud 同步过来的） |
 | `rex phone 1` | 取第 1 条，拷进 `~/Recordings/` 并转写 |
 | `rex in` | 列出 `~/Downloads` / `~/Desktop` 里可转的音视频（AirDrop 落点） |
@@ -42,7 +45,7 @@
 | `rex devices` | 有哪些麦克风和输出设备，现在默认用哪个 |
 | `rex help` | 帮助 |
 | `rex mic` | 明确只录麦克风（无参数的 `rex` 就是它的开关；选项直接跟在后面也行：`rex --device "AirPods Pro"`、`rex --wav`） |
-| 别名 | `rex s`=stop、`rex t`=text、`rex st`=status、`rex f`=find、`rex dev`=devices、`rex all`=both、`rex system`=sys、`rex iphone`=phone、`rex drop`=in、`rex dl`=url、`rex cut`=trim、`rex speakers`=who |
+| 别名 | `rex s`=stop、`rex t`=text、`rex st`=status、`rex f`=find、`rex dev`=devices、`rex all`=both、`rex system`=sys、`rex iphone`=phone、`rex drop`=in、`rex dl`=url、`rex cut`=trim、`rex speakers`=who、`rex mobile`=link、`rex x`=export |
 
 参数：
 
@@ -504,6 +507,17 @@ rex app
 - 关掉 `rex app stop`，看状态 `rex app status`，日志在 `~/Library/Logs/rex-app.log`
 - 只开在本机，别的电脑连不上；浏览器里别的网页也调不动它（有口令、核对来源）
 
+### 导出成 Word 或字幕：`rex export`
+
+```bash
+rex export                 # 最近一条稿子 → Word（写在录音旁边，并在访达里选中）
+rex export 某文件 docx      # 指定一条
+rex export 某文件 srt       # 字幕：就是转写时写好、校对过的那份 <名字>.srt，不另外复制
+```
+
+Word 里有标题（文件名里的关键词）、录音时间，然后一轮一行：`[时间] 说话人：内容`。
+录音台的详情页、手机页面上的每一份稿子，都有「Word」「字幕」两个按钮，点了直接下载。
+
 ### 一条龙：`rex go` 和收件箱
 
 **把录音丢进 `~/Recordings/收件箱`，剩下的全自动。**（第一次先装一下：`rex auto install`。
@@ -778,6 +792,38 @@ iPhone 语音备忘录（最近 10 条）
 - 备忘录容器归 Voice Memos 管，你在手机上删掉那条备忘录，原件就跟着没了
 
 同一条取过一次就不再重取，只重新转写。
+
+### 手机浏览器里录、边录边传：`rex link`
+
+语音备忘录要等 iCloud，取回来还得在 Mac 上跑 `rex phone`。`rex link` 让手机浏览器直接录，**每 5 秒把一段传回 Mac**。
+停了之后录音进收件箱、走 `rex go`；几分钟后稿子就出现在同一个页面上，可以下载 Word 和字幕。
+
+```bash
+rex link             # 起服务、打开 tailscale serve、打出二维码
+rex link status      # 开着没有、地址是什么
+rex link stop        # 关掉（tailscale serve 的端口也一起关）
+rex link new-token   # 换一个新口令；旧二维码就失效了
+```
+
+第一次用之前：
+
+1. Mac 和手机都装上 Tailscale，登同一个账号
+2. 在 https://login.tailscale.com/admin/dns 打开 **MagicDNS** 和 **HTTPS Certificates**
+   （手机浏览器只在 https 页面上给用麦克风；`tailscale serve` 用的是 tailnet 的正式证书，不用自签名）
+3. 想在终端里直接看二维码：`brew install qrencode`（没装就打出地址，在手机上打开）
+
+手机页面有三块：一个大红按钮，点了就录；「上传文件」（语音备忘录、别的录音机导出的，原样进收件箱）；最近的稿子，
+点开看全文，可以下载 Word 和字幕。
+
+注意：
+
+- **录的时候别锁屏、别切走这一页**：手机浏览器到后台就会停掉麦克风。页面会申请保持屏幕常亮
+- 断网了，已经传过来的都留着，网好了剩下的段按顺序补上。页面关了、手机没电：半小时没有新的段，
+  已经收到的照样进收件箱，名字里带「手机录音-未收尾」。录到一半 Mac 重启了的，下次 `rex link` 一起来就收进去
+- 为了安全，它和录音台分开：单独一个进程，只开在 `127.0.0.1`，外面只能经 `tailscale serve` 进来。它只能收录音和
+  文件、列稿子、下载；不能删、不能改、不能开始录音、不能往 Claude 发任何东西。会写东西的请求必须在请求头里带口令、
+  而且同源
+- 日志在 `~/Library/Logs/rex-link.log`；还在收的段放在 `~/.cache/rex/link/`
 
 ### 播客：`rex url`
 
@@ -1116,6 +1162,7 @@ rex status
 | `REX_APP_PORT` / `REX_APP_LOG` | `8790` / `~/Library/Logs/rex-app.log` | 录音台的端口和日志 |
 | `REX_INBOX_LABEL` / `REX_INBOX_LOG` | `local.rex.inbox` / `~/Library/Logs/rex-inbox.log` | 收件箱后台任务的 launchd 名字和日志 |
 | `REX_RUNTIME` | `~/.local/share/rex-runtime` | 后台任务用的脚本副本放哪 |
+| `REX_LINK_PORT` / `REX_LINK_HTTPS` / `REX_LINK_LOG` | `8791` / `8443` / `~/Library/Logs/rex-link.log` | `rex link`：本机端口、tailscale serve 对外开的 https 端口、日志 |
 
 ---
 
@@ -1149,6 +1196,9 @@ BlackHole 装完要**重启一次**。`switchaudio-osx` 不需要——设备切
 | `tools/analyze.py` | `rex go` 的 Claude 分析：写分析报告，留一个 `claude --resume` 能回去的会话 |
 | `tools/claude_cli.py` | 上面两个怎么调 `claude` 命令行：清掉指向别家接口的变量、认出没登录 / 没余额就立刻停 |
 | `tools/rex_app.py`、`tools/rex_app/` | 录音台（`rex app`）：本地网页服务和页面。只开在 127.0.0.1 |
+| `tools/rex_link.py`、`tools/rex_link/` | 手机录（`rex link`）：只收录音和文件、提供稿子下载的服务和手机页面。只开在 127.0.0.1，经 tailscale serve 进来 |
+| `tools/rex_export.py` | `rex export`：Word（只用标准库拼出来的 .docx）和字幕 |
+| `~/.config/rex/link-token` | `rex link` 的口令（权限 600）；`rex link new-token` 会换掉它 |
 | `~/.local/share/rex-runtime/` | 收件箱后台用的脚本副本（后台读不了「文稿」），**自动同步** |
 | `~/.cache/sherpa-onnx/` | 声纹分人的程序和模型（约 93 MB），**不在仓库里** |
 | `~/Recordings/` | 录音和转写稿，**不在仓库里** |

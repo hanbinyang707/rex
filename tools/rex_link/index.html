@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="{{lang}}">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>rex · {{title}}</title>
+<style>
+:root { --bg: #f4f4f2; --fg: #1c1c1c; --muted: #6b6b6b; --line: #d8d8d4; --rec: #c8372d; --card: #ffffff; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #161616; --fg: #ececea; --muted: #9a9a96; --line: #333; --rec: #e0554a; --card: #1f1f1f; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+       font: 16px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+       padding: max(1.2rem, env(safe-area-inset-top)) 1.1rem max(2rem, env(safe-area-inset-bottom)); }
+main { max-width: 34rem; margin: 0 auto; }
+h1 { font-size: 1.15rem; font-weight: 600; margin: 0 0 1.6rem; }
+.rec { display: flex; flex-direction: column; align-items: center; gap: .9rem; margin: 1rem 0 1.4rem; }
+#btn { width: 9.5rem; height: 9.5rem; border-radius: 50%; border: 0; cursor: pointer;
+       background: var(--rec); color: #fff; font: inherit; font-size: 1.15rem; font-weight: 600;
+       box-shadow: 0 0 0 .5rem color-mix(in srgb, var(--rec) 18%, transparent); }
+#btn.on { border-radius: 1.6rem; }
+#btn:disabled { opacity: .45; }
+#btn:focus-visible { outline: 3px solid var(--fg); outline-offset: 4px; }
+#clock { font-size: 2rem; font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+#status { min-height: 1.6em; color: var(--muted); text-align: center; font-size: .95rem; }
+.note { color: var(--muted); font-size: .88rem; margin: 0 0 1.6rem; }
+.warn { background: var(--card); border: 1px solid var(--line); border-radius: .6rem; padding: .7rem .9rem;
+        font-size: .92rem; margin-bottom: 1.2rem; }
+label.up { display: block; border: 1px dashed var(--line); border-radius: .6rem; padding: .9rem; text-align: center;
+           color: var(--muted); font-size: .92rem; margin-bottom: 2.2rem; }
+label.up input { display: block; margin: .6rem auto 0; max-width: 100%; }
+h2 { font-size: 1rem; font-weight: 600; margin: 0; }
+.head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: .6rem; }
+.head button { font: inherit; font-size: .9rem; background: none; border: 0; color: var(--muted); text-decoration: underline; }
+details { background: var(--card); border: 1px solid var(--line); border-radius: .6rem; padding: .7rem .9rem; margin-bottom: .6rem; }
+summary { cursor: pointer; }
+summary small { color: var(--muted); margin-left: .4rem; }
+details pre { white-space: pre-wrap; word-break: break-word; font: inherit; font-size: .93rem; margin: .7rem 0 .4rem; }
+.dl { display: flex; gap: 1rem; font-size: .9rem; }
+.dl a { color: inherit; }
+.empty { color: var(--muted); font-size: .92rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>rex · {{title}}</h1>
+
+  <p class="warn" id="nohttps" hidden>{{nohttps}}</p>
+
+  <section class="rec">
+    <button id="btn" type="button">{{rec}}</button>
+    <div id="clock">00:00</div>
+    <div id="status" role="status" aria-live="polite"></div>
+  </section>
+  <p class="note">{{keep}}</p>
+
+  <label class="up">{{upload}}<input id="file" type="file" accept="audio/*,video/*"></label>
+
+  <section>
+    <div class="head"><h2>{{recent}}</h2><button id="refresh" type="button">{{refresh}}</button></div>
+    <div id="list"></div>
+  </section>
+</main>
+
+<script>
+(function () {
+  'use strict';
+  var T = {{T}};
+  var TOKEN = new URLSearchParams(location.search).get('t') || '';
+  var $ = function (id) { return document.getElementById(id); };
+  var btn = $('btn'), statusEl = $('status');
+  var rec = null, stream = null, sid = null, seq = 0, queue = [], sending = false, failing = false, t0 = 0, timer = null, lock = null;
+
+  function say(s) { statusEl.textContent = s || ''; }
+  function api(path, opts) {
+    opts = opts || {};
+    opts.headers = Object.assign({ 'X-Rex-Token': TOKEN }, opts.headers || {});
+    return fetch(path, opts).then(function (r) {
+      return r.json().catch(function () { return { ok: false, msg: 'HTTP ' + r.status }; })
+        .then(function (j) { j.status = r.status; return j; });
+    });
+  }
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+
+  if (!window.isSecureContext || !navigator.mediaDevices || !window.MediaRecorder) {
+    $('nohttps').hidden = false;
+    btn.disabled = true;
+  }
+
+  function pickType() {
+    var c = [['audio/mp4', 'm4a'], ['audio/webm;codecs=opus', 'webm'], ['audio/webm', 'webm'], ['audio/ogg;codecs=opus', 'ogg']];
+    for (var i = 0; i < c.length; i++) if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(c[i][0])) return c[i];
+    return ['', 'm4a'];
+  }
+
+  function stopTracks() {
+    if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+    if (lock) { lock.release().catch(function () {}); lock = null; }
+  }
+
+  // 那边已经没有这次录音了（断太久，被当成没收尾的收进了收件箱；或者服务重起过）：停下来，说清楚
+  function lost() {
+    queue = []; sid = null;
+    if (rec && rec.state === 'recording') { rec.onstop = null; rec.stop(); }
+    clearInterval(timer); stopTracks();
+    btn.textContent = T.rec; btn.classList.remove('on'); btn.disabled = false;
+    say(T.lost);
+  }
+
+  // 一块一块按顺序传；失败就等一会儿再试同一块，不跳过
+  function pump() {
+    if (sending || !queue.length || !sid) return;
+    sending = true;
+    var blob = queue[0];
+    api('/api/chunk?id=' + encodeURIComponent(sid) + '&seq=' + seq, { method: 'POST', body: blob })
+      .then(function (j) {
+        if (j.ok) { queue.shift(); seq++; if (failing) { failing = false; say(''); } }
+        else if (j.status === 409 && typeof j.want === 'number') { seq = j.want; }
+        else if (j.status === 404) { lost(); }
+        else { failing = true; say(T.fail + (j.msg || j.status)); throw new Error(j.msg || 'error'); }
+      })
+      .catch(function () { return new Promise(function (r) { setTimeout(r, 2000); }); })
+      .then(function () { sending = false; pump(); });
+  }
+
+  function tick() {
+    var s = Math.floor((Date.now() - t0) / 1000);
+    $('clock').textContent = String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+  }
+
+  function start() {
+    var type = pickType();
+    btn.disabled = true;
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) {
+      stream = s;
+      return api('/api/begin?ext=' + type[1], { method: 'POST' });
+    }).then(function (j) {
+      if (!j.ok) throw new Error(j.msg);
+      sid = j.id; seq = 0; queue = []; failing = false;
+      rec = new MediaRecorder(stream, type[0] ? { mimeType: type[0] } : undefined);
+      rec.ondataavailable = function (e) { if (e.data && e.data.size) { queue.push(e.data); pump(); } };
+      rec.onstop = finish;
+      rec.start(5000);
+      t0 = Date.now(); tick(); timer = setInterval(tick, 500);
+      btn.textContent = T.stop; btn.classList.add('on'); btn.disabled = false; say('');
+      if (navigator.wakeLock) navigator.wakeLock.request('screen').then(function (l) { lock = l; }).catch(function () {});
+    }).catch(function (e) {
+      btn.disabled = false;
+      if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+      say(T.denied + (e && e.message ? e.message : e));
+    });
+  }
+
+  function finish() {
+    clearInterval(timer); stopTracks();
+    btn.textContent = T.rec; btn.classList.remove('on'); btn.disabled = true;
+    (function wait() {
+      if (!sid) return;                                   // 中途已经说过「断太久」了
+      if (queue.length || sending) { say(T.wait + ' (' + queue.length + ')'); return setTimeout(wait, 500); }
+      end();
+    })();
+  }
+
+  // 收尾。网断了就隔一会儿再来：那边收到的都在等这一下才进收件箱。收过尾、只是回话丢了的，那边照样说好
+  function end() {
+    api('/api/end?id=' + encodeURIComponent(sid), { method: 'POST' }).then(function (j) {
+      if (j.status === 404) { sid = null; btn.disabled = false; return say(T.lost); }
+      say(j.ok ? T.sent + j.name : T.fail + j.msg);
+      sid = null; btn.disabled = false;
+    }, function () { say(T.wait); setTimeout(end, 2000); });
+  }
+
+  btn.addEventListener('click', function () {
+    if (rec && rec.state === 'recording') rec.stop(); else start();
+  });
+
+  $('file').addEventListener('change', function () {
+    var f = this.files && this.files[0];
+    this.value = '';                                      // 同一个文件还能再选一次
+    if (!f) return;
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/upload?name=' + encodeURIComponent(f.name));
+    xhr.setRequestHeader('X-Rex-Token', TOKEN);
+    xhr.setRequestHeader('X-Rex-Mtime', String((f.lastModified || 0) / 1000));   // 收件箱按原文件的时间起名
+    xhr.upload.onprogress = function (e) { if (e.lengthComputable) say(T.uploading + ' ' + Math.round(e.loaded / e.total * 100) + '%'); };
+    xhr.onload = function () {
+      var j = {}; try { j = JSON.parse(xhr.responseText); } catch (e) {}
+      say(j.ok ? T.sent + j.name : T.fail + (j.msg || xhr.status));
+    };
+    xhr.onerror = function () { say(T.fail + 'network'); };
+    xhr.send(f);
+  });
+
+  function load() {
+    api('/api/recent').then(function (j) {
+      var items = (j && j.items) || [];
+      if (!items.length) { $('list').innerHTML = '<p class="empty">' + esc(T.none) + '</p>'; return; }
+      $('list').innerHTML = items.map(function (it) {
+        var q = '&k=' + encodeURIComponent(it.key) + '&t=' + encodeURIComponent(TOKEN);
+        return '<details><summary>' + esc(it.title) + '<small>' + esc(it.when) + '</small></summary>' +
+          '<pre>' + esc(it.text) + '</pre><div class="dl">' +
+          '<a href="/api/file?fmt=docx' + q + '">' + esc(T.word) + '</a>' +
+          (it.srt ? '<a href="/api/file?fmt=srt' + q + '">' + esc(T.subs) + '</a>' : '') + '</div></details>';
+      }).join('');
+    });
+  }
+  $('refresh').addEventListener('click', load);
+  load();
+})();
+</script>
+</body>
+</html>

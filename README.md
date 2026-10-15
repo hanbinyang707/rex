@@ -31,6 +31,8 @@ Every design decision here comes from a recording that failed without any error 
 | `rex go [file]` | Transcribe → speakers → Claude proofreading → Claude analysis |
 | `rex auto install` | Watch `~/Recordings/收件箱` (inbox) with launchd; anything dropped there goes through `rex go` |
 | `rex app` | Recording Desk web UI at `http://127.0.0.1:8790`: record, review corrections (Y/N, or accept all at once), ask follow-up questions, search, double-click a recording to move it to the Trash |
+| `rex link` | **Record from your phone**: prints a QR code; open it in the phone's browser and record. Audio streams back to the Mac and goes through `rex go` (over Tailscale, so only your own devices can reach it) |
+| `rex export [file] [docx\|srt]` | Export a transcript as Word, or get its subtitle file; the Recording Desk and the phone page have the same two buttons |
 | `rex phone` | Import iPhone Voice Memos synced through iCloud |
 | `rex url <link>` | Download a podcast episode's audio and transcribe it |
 | `rex find <word>` | Search all transcripts |
@@ -80,6 +82,8 @@ rex app       # open the Recording Desk
 - Recording, transcription and speaker diarization all run on your Mac.
 - Only `rex go` and the web UI's "ask" box send text out: the transcript goes to Anthropic through your local `claude` login. rex clears `ANTHROPIC_*` environment variables first, so a shell that points `claude` at another provider doesn't redirect your transcripts. Set `REX_CLAUDE_ENV=inherit` to keep them.
 - The web UI listens on `127.0.0.1` only and checks the Host header, a per-launch cookie token and the request origin.
+- The phone service behind `rex link` is a separate process, also bound to `127.0.0.1`, reachable only from your own tailnet through `tailscale serve` (not Funnel, never the public internet).
+  It can only receive recordings and files, list recent transcripts and download them; it cannot delete, edit, start a recording or send anything to Claude. The token is in the QR code; `rex link new-token` replaces it.
 - **Recording other people:** consent laws differ (one-party vs. all-party). Tell people you are recording.
 
 ## Layout
@@ -93,6 +97,8 @@ rex app       # open the Recording Desk
 | `tools/speakers.py`, `tools/diarize.py` | Two-track dialogue merge (echo removal); voiceprint diarization |
 | `tools/proofread.py`, `tools/analyze.py`, `tools/claude_cli.py` | Claude proofreading (only a list of corrections, applied verbatim) and analysis |
 | `tools/rex_app.py`, `tools/rex_app/` | Recording Desk web UI |
+| `tools/rex_link.py`, `tools/rex_link/` | Phone recording service and page (`rex link`) |
+| `tools/rex_export.py` | Word / subtitle export |
 | `tools/whisper-prompt.txt`, `tools/whisper-fix.txt` | Templates for your vocabulary hints and fixed replacements; copy them to `~/.config/rex/` and edit there |
 | `docs/manual.md`, `docs/manual.zh-CN.md` | Full manual (English, Chinese) |
 

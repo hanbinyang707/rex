@@ -52,7 +52,9 @@ TOOLS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, TOOLS)
 import claude_cli  # noqa: E402
 import proofread  # noqa: E402
+import rex_export  # noqa: E402
 from i18n import L, EN  # noqa: E402
+from rex_export import parse_name  # noqa: E402  文件名怎么认、标题怎么取：和手机页、Word 共用一份
 
 REX_DIR = os.environ.get("REX_DIR") or os.path.expanduser("~/Recordings")
 INBOX = os.environ.get("REX_INBOX") or os.path.join(REX_DIR, "收件箱")
@@ -72,12 +74,6 @@ MEDIA_TYPE = {".m4a": "audio/mp4", ".m4b": "audio/mp4", ".mp4": "video/mp4", ".m
               ".mov": "video/quicktime", ".wav": "audio/wav", ".mp3": "audio/mpeg", ".aac": "audio/aac",
               ".flac": "audio/flac", ".ogg": "audio/ogg", ".opus": "audio/ogg", ".webm": "audio/webm",
               ".caf": "audio/x-caf", ".aiff": "audio/aiff", ".aif": "audio/aiff", ".qta": "audio/mp4"}
-# 本工具起的名字：日期_时刻_来源[-分轨][_关键词]
-NAME = re.compile(r"^(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})(\d{2})?_(mic|sys|both|phone|drop-[^_]*)"
-                  r"(?:-(mic|sys))?(?:_(.+))?$")
-# 来源只是显示用的标签，跟着界面语言走。app.js 拿它比较时用同一对中英文（T('导入', 'Imported')），别在一边单改
-SOURCE = {"mic": L("麦克风", "Microphone"), "sys": L("电脑声音", "Computer audio"), "both": L("通话", "Call"),
-          "phone": L("手机", "Phone")}
 DIALOGUE = re.compile(r"^\[[0-9:]+\] ([^：]{1,12})：")
 
 _dur_lock = threading.Lock()
@@ -142,21 +138,6 @@ def durations(paths):
 
 
 # ---------------------------------------------------------------- 录音列表
-
-def parse_name(key):
-    m = NAME.match(key)
-    if not m:
-        return None
-    y, mo, d, hh, mm, ss, src, track, kw = m.groups()
-    if src.startswith("drop-"):
-        source, origin = L("导入", "Imported"), src[5:]
-    else:
-        source, origin = SOURCE.get(src, src), ""
-    kw = (kw or "").replace("-", " · ")
-    # 导入的文件用原名当标题：那是用户自己起的（比如「某某项目介绍会」），比自动抽的关键词有用
-    return {"when": "%s-%s-%s %s:%s" % (y, mo, d, hh, mm), "source": source, "origin": origin, "kw": kw,
-            "title": (origin.replace("-", " ") if origin and origin != "drop" else "") or kw or source}
-
 
 def proof_summary(prefix):
     js = prefix + ".校对.json"
@@ -264,7 +245,7 @@ def audio_files(key):
 
 # 一条录音在磁盘上是这些文件：音频（老的 --split 是两条分轨）、稿子、校对和分析的产物。只认这些确切的名字，
 # 不按前缀通配——X 和 X_关键词 是两条不同的录音
-REC_SUFFIXES = (".txt", ".srt", ".whisper.srt", ".校对.json", ".校对.md", ".分析.md", ".对话.json")
+REC_SUFFIXES = (".txt", ".srt", ".whisper.srt", ".校对.json", ".校对.md", ".分析.md", ".对话.json", ".docx")
 
 
 def recording_files(key):
@@ -824,6 +805,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "results": search(q1("q"))})
             if u.path == "/api/phone":
                 return self.send_json(phone_list())
+            if u.path == "/api/export":
+                key, fmt = q1("k"), q1("fmt", "docx")
+                if not key or "/" in key or fmt not in ("docx", "srt"):
+                    return self.send_json({"ok": False, "msg": L("名字不对", "Invalid name")}, 400)
+                try:
+                    path = rex_export.export(os.path.join(REX_DIR, key), fmt)
+                except FileNotFoundError:
+                    return self.send_json({"ok": False, "msg": L("这条还没有稿子", "This recording has no transcript yet")}, 404)
+                with open(path, "rb") as fh:
+                    data = fh.read()
+                self.send_response(200)
+                self.send_header("Content-Type", rex_export.MIME[fmt])
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Content-Disposition", rex_export.disposition(os.path.basename(path)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if u.path == "/media":
                 files = audio_files(q1("k"))
                 i = int(q1("i", "0") or 0)

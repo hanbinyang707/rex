@@ -29,6 +29,9 @@ The code is in `tools/rex.sh`. When you install it, symlink it to `~/.local/bin/
 | `rex app stop` / `rex app status` / `rex app restart` | Shut it down / check whether it's running / restart it |
 | `rex text` | Transcribes the latest recording into text. A `rex both` recording produces a **dialogue transcript**: who spoke, when, and what they said |
 | `rex text 某文件` (某文件 = a given file) | Transcribes the given audio file (any format ffmpeg recognizes) |
+| `rex link` | **Record from your phone**: prints a QR code; open it in the phone's browser and record, and the audio streams back and goes through `rex go` (see section 6) |
+| `rex link stop` / `rex link status` / `rex link new-token` | Shut it down / show status and address / make a new token (old QR codes stop working) |
+| `rex export [文件] [docx\|srt]` | Export a transcript as Word, or get its subtitle file; with no file, the latest one (see "Export" in section 5) |
 | `rex phone` | Lists iPhone Voice Memos (synced over via iCloud) |
 | `rex phone 1` | Takes item 1, copies it into `~/Recordings/` and transcribes it |
 | `rex in` | Lists transcribable audio and video files in `~/Downloads` / `~/Desktop` (where AirDrop puts files) |
@@ -43,7 +46,7 @@ The code is in `tools/rex.sh`. When you install it, symlink it to `~/.local/bin/
 | `rex devices` | Which microphones and output devices there are, and which ones are currently the defaults |
 | `rex help` | Help |
 | `rex mic` | Explicitly records only the microphone (plain `rex` with no arguments is its on/off toggle; you can also put options directly after it: `rex --device "AirPods Pro"`, `rex --wav`) |
-| Aliases | `rex s`=stop, `rex t`=text, `rex st`=status, `rex f`=find, `rex dev`=devices, `rex all`=both, `rex system`=sys, `rex iphone`=phone, `rex drop`=in, `rex dl`=url, `rex cut`=trim, `rex speakers`=who |
+| Aliases | `rex s`=stop, `rex t`=text, `rex st`=status, `rex f`=find, `rex dev`=devices, `rex all`=both, `rex system`=sys, `rex iphone`=phone, `rex drop`=in, `rex dl`=url, `rex cut`=trim, `rex speakers`=who, `rex mobile`=link, `rex x`=export |
 
 Options:
 
@@ -414,6 +417,17 @@ A few notes:
 - Stop it with `rex app stop` and check its status with `rex app status`; the log is at `~/Library/Logs/rex-app.log`
 - It only listens on this machine, so other computers can't connect; other web pages in your browser can't control it either (it requires a token and checks the request origin)
 
+### Export to Word or subtitles: `rex export`
+
+```bash
+rex export                 # latest transcript → Word (written next to the recording and selected in Finder)
+rex export <file> docx     # a specific one
+rex export <file> srt      # subtitles: the <name>.srt written and proofread during transcription; no extra copy is made
+```
+
+The Word file has a title (the keyword from the file name), the recording time, then one line per turn: `[time] speaker: words`.
+The Recording Desk's detail view and each transcript on the phone page have "Word" and "Subtitles" buttons that download directly.
+
 ### End to end: `rex go` and the inbox
 
 **Drop a recording into `~/Recordings/收件箱` (the inbox) and the rest is automatic.** (The first time, install it: `rex auto install`. To open the folder in Finder: `rex auto open`; while you're at it, drag the folder into the Finder sidebar so that from then on you can drag files straight into it.)
@@ -623,6 +637,33 @@ Why make a copy instead of transcribing the original directly? Three reasons:
 - The memo's container is managed by Voice Memos: delete that memo on the phone and the original goes with it
 
 A memo that has been fetched once isn't fetched again; it is only re-transcribed.
+
+### Recording in the phone's browser, streamed live: `rex link`
+
+Voice Memos waits for iCloud, and you still have to run `rex phone` on the Mac afterwards. `rex link` lets the phone's browser record directly, **sending a chunk back to the Mac every 5 seconds**. When you stop, the recording goes into the inbox and through `rex go`; a few minutes later the transcript shows up on the same page, with Word and subtitle downloads.
+
+```bash
+rex link             # start the service, open tailscale serve, print a QR code
+rex link status      # is it running, and at what address
+rex link stop        # shut it down (the tailscale serve port is closed too)
+rex link new-token   # make a new token; old QR codes stop working
+```
+
+Before the first use:
+
+1. Install Tailscale on the Mac and the phone and sign in with the same account
+2. At https://login.tailscale.com/admin/dns, turn on **MagicDNS** and **HTTPS Certificates**
+   (phone browsers only allow the microphone on https pages; `tailscale serve` uses the tailnet's real certificate, no self-signed one)
+3. To see the QR code right in the terminal: `brew install qrencode` (without it, the address is printed for you to open on the phone)
+
+The phone page has three parts: a big red button to record; "upload a file" (a Voice Memo or an export from another recorder, which goes into the inbox as is); and recent transcripts, which expand to the full text with Word and subtitle downloads.
+
+Notes:
+
+- **Keep the screen on and stay on the page while recording**: phone browsers stop the microphone in the background. The page asks for a screen wake lock
+- If the network drops, what was already sent is kept, and the remaining chunks follow in order when it comes back. If the page is closed or the phone dies: after half an hour without a new chunk, whatever arrived still goes into the inbox, with "phone-partial" in its name. If the Mac restarted in the middle, that happens the next time you run `rex link`
+- For safety it is separate from the Recording Desk: its own process, bound to `127.0.0.1`, reachable from outside only through `tailscale serve`. It can only receive recordings and files, list transcripts and download them; it cannot delete, edit, start a recording or send anything to Claude. Requests that write anything must carry the token in a header and come from the same origin
+- The log is in `~/Library/Logs/rex-link.log`; chunks still being received are in `~/.cache/rex/link/`
 
 ### Podcasts: `rex url`
 
@@ -903,6 +944,7 @@ Select it again manually in the menu bar. The next time `rex` starts, it automat
 | `REX_APP_PORT` / `REX_APP_LOG` | `8790` / `~/Library/Logs/rex-app.log` | Port and log of the Recording Desk |
 | `REX_INBOX_LABEL` / `REX_INBOX_LOG` | `local.rex.inbox` / `~/Library/Logs/rex-inbox.log` | launchd label and log of the inbox background job |
 | `REX_RUNTIME` | `~/.local/share/rex-runtime` | Where the copies of the scripts used by background jobs are kept |
+| `REX_LINK_PORT` / `REX_LINK_HTTPS` / `REX_LINK_LOG` | `8791` / `8443` / `~/Library/Logs/rex-link.log` | `rex link`: local port, the https port tailscale serve exposes, and the log |
 
 ---
 
@@ -934,6 +976,9 @@ After installing BlackHole, you need to **reboot once**. `switchaudio-osx` isn't
 | `tools/analyze.py` | Claude analysis for `rex go`: writes the analysis report and leaves a session you can return to with `claude --resume` |
 | `tools/claude_cli.py` | How the two above call the `claude` CLI: clears variables that point at another provider's API, and stops immediately when it detects you're not logged in or out of credit |
 | `tools/rex_app.py`, `tools/rex_app/` | The Recording Desk (`rex app`): the local web server and pages. Listens only on 127.0.0.1 |
+| `tools/rex_link.py`, `tools/rex_link/` | Phone recording (`rex link`): a service and phone page that only receive recordings and files and offer transcripts for download. Listens only on 127.0.0.1; reached through tailscale serve |
+| `tools/rex_export.py` | `rex export`: Word (a .docx assembled with the standard library) and subtitles |
+| `~/.config/rex/link-token` | The `rex link` token (mode 600); replaced by `rex link new-token` |
 | `~/.local/share/rex-runtime/` | Copies of the scripts for the inbox background job (background jobs can't read "Documents"), **synced automatically** |
 | `~/.cache/sherpa-onnx/` | Program and models for voiceprint speaker diarization (about 93 MB), **not in the repository** |
 | `~/Recordings/` | Recordings and transcripts, **not in the repository** |
