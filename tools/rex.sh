@@ -1092,7 +1092,7 @@ rows.sort(key=os.path.getmtime, reverse=True)
 for i, p in enumerate(rows, 1):
     ts = time.strftime("%Y-%m-%d_%H%M", time.localtime(os.path.getmtime(p)))
     target = "%s_drop-%s" % (ts, stem_for(p))
-    done = 1 if glob.glob(os.path.join(rex, target + "*")) else 0
+    done = 1 if glob.glob(os.path.join(rex, target + ".*")) or glob.glob(os.path.join(rex, target + "_*")) else 0
     try:
         out = subprocess.check_output(
             ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
@@ -1148,7 +1148,8 @@ in_cmd() {
     target=$(printf '%s' "$line" | cut -f3)
     out="$REX_DIR/$target.m4a"
 
-    have=$(ls -1 "$REX_DIR/$target"*.m4a 2>/dev/null | head -1)
+    # 只认它自己和按关键词改过名的「X_词」。写成 X* 的话，同一分钟的 X-2 会被当成 X，X 就再也不转了
+    have=$(ls -1 "$REX_DIR/$target".m4a "$REX_DIR/$target"_*.m4a 2>/dev/null | head -1)
     if [ -n "$have" ]; then
       sayL "${C_D}已经导过：$have${C_0}" "${C_D}Already imported: $have${C_0}"
       out="$have"
@@ -1779,7 +1780,7 @@ import_drop() {
   src="$1"
   target=$(DROP_DIRS="$(dirname "$src")" drop_scan | awk -F'\t' -v p="$src" '$2==p { print $3; exit }')
   [ -n "$target" ] || return 1
-  have=$(ls -1 "$REX_DIR/$target"*.m4a 2>/dev/null | head -1)
+  have=$(ls -1 "$REX_DIR/$target".m4a "$REX_DIR/$target"_*.m4a 2>/dev/null | head -1)   # 不写 X*：见 in_cmd
   if [ -n "$have" ]; then printf '%s\n' "$have"; return 0; fi
   out="$REX_DIR/$target.m4a"
   if ! ffmpeg -hide_banner -loglevel error -i "$src" -map 0:a:0 -c:a copy -y "$out" 2>/dev/null; then
