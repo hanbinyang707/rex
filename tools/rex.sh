@@ -495,7 +495,7 @@ route_loop() {
 # 看见 173 字的稿子才发现。rex status 查得出来，但那要人主动去查——
 # 两小时的会里没人会想起来查。所以改成它自己查。
 #
-# 代价：每次检查会开一下输入设备（1 秒）。REX_WATCH=0 可以整个关掉。
+# 现在每次检查只读 audiocap 写的电平文件，不再另开输入设备（见 watch_track）。REX_WATCH=0 可以整个关掉。
 WATCH_EVERY="${REX_WATCH:-180}"
 WATCH_LOG="$REX_DIR/.watch.log"
 
@@ -549,6 +549,25 @@ watch_track() {
   watch_report "$label" "$tag" "$dead" "$p" "$kind"
 }
 
+# 丢数据（缓冲溢出）：帧照样在涨、电平也正常，可有一部分没存进去——watch_track 看不出来。最常见的是录到一半
+# 别的 App（通话、会议）改了麦克风的格式：声道数一变，ffmpeg 还按开录时的读，只读得动三分之一，其余全丢
+# （2026-10-17 一条「我 + 对方」从第 3 分钟起麦克风丢了三分之二，停了才知道）。最近一段丢了一成以上就报，每路只报一次
+watch_overrun() {
+  label="$1"; tag="$2"
+  f="$CAP_DIR/$tag.level"; [ -f "$f" ] || return 0
+  ov=$(sed -nE 's/.*"overrun": ([0-9]+).*/\1/p' "$f"); fr=$(sed -nE 's/.*"frames": ([0-9]+).*/\1/p' "$f")
+  pf="$REX_DIR/.watch-ov-$tag"; prev=$(cat "$pf" 2>/dev/null); printf '%s %s' "${ov:-0}" "${fr:-0}" > "$pf"
+  [ -n "$prev" ] || return 0                      # 第一次只记下来
+  dov=$(( ${ov:-0} - ${prev%% *} )); dfr=$(( ${fr:-0} - ${prev##* } ))
+  [ "$dov" -gt 0 ] && [ $((dov * 10)) -gt "$dfr" ] || return 0
+  [ -f "$REX_DIR/.watch-ovsaid-$tag" ] && return 0
+  : > "$REX_DIR/.watch-ovsaid-$tag"
+  pct=$(( dov * 100 / (dov + dfr) ))
+  m=$(L "${label}在丢数据（最近几分钟丢了 ${pct}%），多半是别的 App 改了它的格式。要这一路完整：停了重开一条" "${label} is losing data (${pct}% over the last few minutes), most likely because another app changed its format. For a complete track: stop and start a new recording")
+  printf '%s  %s\n' "$(date +%H:%M:%S)" "$m" >> "$WATCH_LOG"
+  osascript -e "display notification \"${m}\" with title \"$(L 'rex 录音警告' 'rex recording warning')\"" 2>/dev/null
+}
+
 # 只在「由通到断」那一刻报一次，别每三分钟刷一次屏。
 watch_report() {
   label="$1"; idx="$2"; dead="$3"; detail="$4"; kind="$5"
@@ -579,6 +598,8 @@ watch_loop() {
       both) watch_track "$(L '麦克风' 'Microphone')" mic mic
             watch_track "$(L '系统声音' 'System audio')" sys sys ;;
     esac
+    case "$mode" in mic|both) watch_overrun "$(L '麦克风' 'Microphone')" mic ;; esac
+    case "$mode" in sys|both) watch_overrun "$(L '系统声音' 'System audio')" sys ;; esac
   done
   # ffmpeg 没了而状态文件还指着它：不是 rex stop 停的（stop 一进来就把状态文件改名认领了）。到了时长上限、
   # 设备断了、磁盘满了都走到这里——不收尾的话直通设备一直占着输出、状态文件带着死 PID 留着、没人知道录音停了
@@ -931,10 +952,20 @@ stop() {
   w=$(getf watch "$SF"); [ -n "$w" ] && [ "$w" != "$$" ] && kill "$w" 2>/dev/null
   rt=$(getf route "$SF"); [ -n "$rt" ] && kill "$rt" 2>/dev/null
   rm -f "$REX_DIR"/.watch-*
-  # 收尾前把采集进程报的溢出记下来（它在电平文件里）：缓冲溢出 = 文件里少了一段，看着却是完整的
+  # 收尾前把采集进程报的溢出记下来（它在电平文件里）：缓冲溢出 = 文件里少了一段，看着却是完整的。
+  # 丢得多（三成以上、一直在丢）几乎都是录到一半格式变了（见 watch_overrun），那一路从那以后是乱的，不只是缺几段
   for tag in mic sys; do
-    ov=$(sed -nE 's/.*"overrun": ([0-9]+).*/\1/p' "$CAP_DIR/$tag.level" 2>/dev/null)
-    [ "${ov:-0}" -gt 0 ] 2>/dev/null && warnL "⚠ ${tag} 这一路缓冲溢出丢过 ${ov} 帧（下游写得太慢），这一段在文件里是缺的" "⚠ The ${tag} track lost ${ov} frame(s) to buffer overruns (the consumer was too slow); that part is missing from the file"
+    f="$CAP_DIR/$tag.level"
+    ov=$(sed -nE 's/.*"overrun": ([0-9]+).*/\1/p' "$f" 2>/dev/null); fr=$(sed -nE 's/.*"frames": ([0-9]+).*/\1/p' "$f" 2>/dev/null)
+    [ "${ov:-0}" -gt 0 ] 2>/dev/null || continue
+    pct=$(( ov * 100 / (ov + ${fr:-0}) ))
+    if [ "$pct" -gt 0 ]; then share=" ${pct}%"; share_en="${pct}%"; else share="不到 1%"; share_en="under 1%"; fi
+    if [ "$tag" = mic ]; then nm=$(L "麦克风" "microphone"); else nm=$(L "系统声音" "system audio"); fi
+    if [ "$pct" -ge 30 ]; then
+      warnL "⚠ ${nm}这一路丢了${share} 的数据：多半是录到一半别的 App（通话、会议）改了它的格式，从那以后这一路是乱的。另一路不受影响" "⚠ The ${nm} track lost ${share_en} of its data: most likely another app (a call or meeting) changed its format mid-recording, and from then on this track is garbled. The other track is unaffected"
+    else
+      warnL "⚠ ${nm}这一路缓冲溢出，丢了${share} 的数据（下游写得太慢），丢的那几段在文件里是缺的" "⚠ The ${nm} track lost ${share_en} of its data to buffer overruns (the consumer was too slow); those parts are missing from the file"
+    fi
   done
   for c in $(getf caps "$SF"); do caps="${caps:-} $c"; done
   stop_caps
