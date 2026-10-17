@@ -549,9 +549,9 @@ watch_track() {
   watch_report "$label" "$tag" "$dead" "$p" "$kind"
 }
 
-# 丢数据（缓冲溢出）：帧照样在涨、电平也正常，可有一部分没存进去——watch_track 看不出来。最常见的是录到一半
-# 别的 App（通话、会议）改了麦克风的格式：声道数一变，ffmpeg 还按开录时的读，只读得动三分之一，其余全丢
-# （2026-10-17 一条「我 + 对方」从第 3 分钟起麦克风丢了三分之二，停了才知道）。最近一段丢了一成以上就报，每路只报一次
+# 丢数据（缓冲溢出）：帧照样在涨、电平也正常，可有一部分没存进去——watch_track 看不出来。2026-10-17 一条
+# 「我 + 对方」录到一半麦克风被微信视频切成 3 声道，ffmpeg 还按 1 声道读，从第 3 分钟起丢了三分之二，停了才知道
+# （那之后 audiocap 会自己对齐声道数，见它的 ingest；这里兜的是别的原因）。最近一段丢了一成以上就报，每路只报一次
 watch_overrun() {
   label="$1"; tag="$2"
   f="$CAP_DIR/$tag.level"; [ -f "$f" ] || return 0
@@ -563,7 +563,7 @@ watch_overrun() {
   [ -f "$REX_DIR/.watch-ovsaid-$tag" ] && return 0
   : > "$REX_DIR/.watch-ovsaid-$tag"
   pct=$(( dov * 100 / (dov + dfr) ))
-  m=$(L "${label}在丢数据（最近几分钟丢了 ${pct}%），多半是别的 App 改了它的格式。要这一路完整：停了重开一条" "${label} is losing data (${pct}% over the last few minutes), most likely because another app changed its format. For a complete track: stop and start a new recording")
+  m=$(L "${label}在丢数据（最近几分钟丢了 ${pct}%）。要这一路完整：停了重开一条" "${label} is losing data (${pct}% over the last few minutes). For a complete track: stop and start a new recording")
   printf '%s  %s\n' "$(date +%H:%M:%S)" "$m" >> "$WATCH_LOG"
   osascript -e "display notification \"${m}\" with title \"$(L 'rex 录音警告' 'rex recording warning')\"" 2>/dev/null
 }
@@ -952,16 +952,22 @@ stop() {
   w=$(getf watch "$SF"); [ -n "$w" ] && [ "$w" != "$$" ] && kill "$w" 2>/dev/null
   rt=$(getf route "$SF"); [ -n "$rt" ] && kill "$rt" 2>/dev/null
   rm -f "$REX_DIR"/.watch-*
-  # 收尾前把采集进程报的溢出记下来（它在电平文件里）：缓冲溢出 = 文件里少了一段，看着却是完整的。
-  # 丢得多（三成以上、一直在丢）几乎都是录到一半格式变了（见 watch_overrun），那一路从那以后是乱的，不只是缺几段
+  # 收尾前把采集进程报的东西记下来（在电平文件里）：
+  # · 声道数中途变了（fmt_changes）：新版 audiocap 自己对齐了，录音没事，说一声
+  # · 缓冲溢出（overrun）：文件里少了一段，看着却是完整的。老版 audiocap 没有 fmt_changes 这一项，那时丢得多（三成以上）
+  #   几乎都是录到一半格式变了（2026-10-17 微信视频那一回），那一路从那以后是乱的，不只是缺几段
   for tag in mic sys; do
     f="$CAP_DIR/$tag.level"
-    ov=$(sed -nE 's/.*"overrun": ([0-9]+).*/\1/p' "$f" 2>/dev/null); fr=$(sed -nE 's/.*"frames": ([0-9]+).*/\1/p' "$f" 2>/dev/null)
+    [ -f "$f" ] || continue
+    ov=$(sed -nE 's/.*"overrun": ([0-9]+).*/\1/p' "$f"); fr=$(sed -nE 's/.*"frames": ([0-9]+).*/\1/p' "$f")
+    fc=$(sed -nE 's/.*"fmt_changes": ([0-9]+).*/\1/p' "$f"); gs=$(sed -nE 's/.*"gap_s": ([0-9.]+).*/\1/p' "$f")
+    if [ "$tag" = mic ]; then nm=$(L "麦克风" "microphone"); else nm=$(L "系统声音" "system audio"); fi
+    [ "${fc:-0}" -gt 0 ] && sayL "${C_D}${nm}录到一半换了 ${fc} 次格式（别的程序打开它时会这样，比如开了视频通话），已经自动对齐，这一路照常录下来了${C_0}" "${C_D}The ${nm} changed format ${fc} time(s) mid-recording (this happens when another program opens it, such as a video call); it was aligned automatically and the track recorded normally${C_0}"
+    case "${gs:-0.00}" in 0.00|0) ;; *) sayL "${C_D}${nm}中途停顿过 ${gs} 秒（换格式那一下），补上了同样长的静音，和另一路照样对得齐${C_0}" "${C_D}The ${nm} paused for ${gs} s in total (when its format changed); the same length was filled with silence so it stays aligned with the other track${C_0}" ;; esac
     [ "${ov:-0}" -gt 0 ] 2>/dev/null || continue
     pct=$(( ov * 100 / (ov + ${fr:-0}) ))
     if [ "$pct" -gt 0 ]; then share=" ${pct}%"; share_en="${pct}%"; else share="不到 1%"; share_en="under 1%"; fi
-    if [ "$tag" = mic ]; then nm=$(L "麦克风" "microphone"); else nm=$(L "系统声音" "system audio"); fi
-    if [ "$pct" -ge 30 ]; then
+    if [ -z "$fc" ] && [ "$pct" -ge 30 ]; then
       warnL "⚠ ${nm}这一路丢了${share} 的数据：多半是录到一半别的 App（通话、会议）改了它的格式，从那以后这一路是乱的。另一路不受影响" "⚠ The ${nm} track lost ${share_en} of its data: most likely another app (a call or meeting) changed its format mid-recording, and from then on this track is garbled. The other track is unaffected"
     else
       warnL "⚠ ${nm}这一路缓冲溢出，丢了${share} 的数据（下游写得太慢），丢的那几段在文件里是缺的" "⚠ The ${nm} track lost ${share_en} of its data to buffer overruns (the consumer was too slow); those parts are missing from the file"

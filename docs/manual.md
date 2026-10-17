@@ -919,6 +919,15 @@ Check whether it really is recording. If the process is gone but the state file 
 
 Select it again manually in the menu bar. The next time `rex` starts, it automatically cleans up leftover temporary devices.
 
+### Recording during a video call (WeChat, FaceTime and the like)
+
+When a call app opens the microphone, it switches the Mac's built-in microphone from 1 to 3 channels (and back when the call ends), and the device pauses for about 0.25 s at each switch;
+the computer-audio track pauses briefly too. Since 2026-10-17 the recording program keeps the channel count it started with and fills each pause with the same length of silence,
+so the two tracks stay aligned; the report at stop says "changed format N time(s) mid-recording … aligned automatically".
+
+In recordings made before that, the microphone track is garbled from the moment the call opened the microphone (two thirds of its data was lost); the other side's track is unaffected.
+If a track is losing data during a recording, the watchdog shows a notification, and the report at stop says how much was lost.
+
 ### The Recording Desk suddenly stopped working (it was fine before)
 
 The page won't load, `rex app status` says the Recording Desk is "stuck", and the log shows `PermissionError: Operation not permitted`.

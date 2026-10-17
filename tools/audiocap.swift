@@ -491,14 +491,20 @@ var lastFrameT: Double = 0    // 最近一帧到达的墙钟时刻（电平文�
 var lock = os_unfair_lock()
 var winPeak: Float = 0   // 上次报电平以来的峰值（绝对值），--level 用
 
-// 非交错输入（每个声道一块缓冲）先在这里拼成交错的。按最大 IO 块预分配，实时线程里不分配内存。
+// 非交错输入（每个声道一块缓冲）、声道数中途变了的输入，先在这里排成开录时的 ch 声道交错。
+// 按最大 IO 块预分配，实时线程里不分配内存。
 let scratch = UnsafeMutablePointer<Float>.allocate(capacity: 16384 * max(ch, 1))
+let silence = UnsafeMutablePointer<Float>.allocate(capacity: 16384 * max(ch, 1))   // 补停顿用的静音
+silence.initialize(repeating: 0, count: 16384 * max(ch, 1))
+var srcChNow = ch        // 设备眼下交来的声道数（锁里改、锁里读）
+var fmtChanges = 0       // 录的过程中声道数变了几次：写进电平文件，rex stop 的报告里提一句
 
-func push(_ src: UnsafePointer<Float>, _ nFloats: Int) {
+func push(_ src: UnsafePointer<Float>, _ nFloats: Int, _ srcCh: Int) {
     let now = Date().timeIntervalSince1970
     var pk: Float = 0
     for i in 0..<nFloats { let v = abs(src[i]); if v > pk { pk = v } }
     os_unfair_lock_lock(&lock)
+    if srcCh != srcChNow { srcChNow = srcCh; fmtChanges += 1 }
     if pk > winPeak { winPeak = pk }        // 溢出丢掉的那段峰值也算：不然下游写得慢会被报成「麦克风没信号」
     lastFrameT = now
     if firstFrameT == 0 { firstFrameT = now }
@@ -536,30 +542,91 @@ func pop(_ dst: UnsafeMutablePointer<Float>, _ maxFloats: Int) -> Int {
 
 // ---------------------------------------------------------------- 采集
 
-var procID: AudioDeviceIOProcID?
-let st = AudioDeviceCreateIOProcIDWithBlock(&procID, dev, nil) { _, inData, _, _, _ in
-    let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inData))
-    if abl.count == 1 {
-        let b = abl[0]
-        guard let p = b.mData, b.mDataByteSize > 0 else { return }
-        push(p.assumingMemoryBound(to: Float.self), Int(b.mDataByteSize) / 4)
-    } else if abl.count > 1 {
-        // 非交错：每块一个声道，拼成交错
-        let frames = Int(abl[0].mDataByteSize) / (4 * max(Int(abl[0].mNumberChannels), 1))
-        guard frames > 0 else { return }
-        guard frames <= 16384 else {           // 超过预分配的拼接缓冲：丢，但要计数，别悄悄丢
-            os_unfair_lock_lock(&lock); overrun += frames; os_unfair_lock_unlock(&lock); return
+// ingest: begin —— tests/test_audiocap_ingest.py 把这一段原样抽出来编进测试程序：它用到的 ch、scratch、push、lock、
+// overrun 留在外面，别挪进来
+//
+// 声道数中途变了：别的程序打开这个麦克风时会把它切成另一种格式。2026-10-17 一边开微信视频一边录「我 + 对方」，
+// 内置麦克风在通话打开它时从 1 声道变成 3 声道（挂断又变回 1），ffmpeg 还按开录时的 1 声道读，只读得动三分之一，
+// 其余全丢，那一路从第 3 分钟起成了乱的。所以交给下游的永远是开录时的 ch 声道：
+// 目标是单声道就把所有声道取平均；否则第 c 路取第 c 个声道，少了复制最后一个。
+@inline(__always)
+func remix(_ frames: Int, _ src: Int, _ dstCh: Int, _ dst: UnsafeMutablePointer<Float>,
+           _ sample: (Int, Int) -> Float) {
+    if dstCh == 1 {
+        let scale = 1 / Float(max(src, 1))
+        for i in 0..<frames {
+            var s: Float = 0
+            for k in 0..<src { s += sample(k, i) }
+            dst[i] = s * scale
         }
-        var c = 0
-        for b in abl {
-            guard let p = b.mData else { continue }
-            let f = p.assumingMemoryBound(to: Float.self)
-            for i in 0..<frames { scratch[i * ch + c] = f[i] }
-            c += 1
-            if c >= ch { break }
+    } else {
+        for i in 0..<frames {
+            for c in 0..<dstCh { dst[i * dstCh + c] = sample(min(c, src - 1), i) }
         }
-        push(scratch, frames * ch)
     }
+}
+
+// 设备换格式的那一下会停顿：2026-10-17 实测每次约 0.25 秒一个采样都不交（10 秒里切两次只交出 9.5 秒）。不补的话
+// 这一路从那以后比另一路提前，合并对话稿时判回声只留 0.3 秒余量，提前半秒对方的话就会被当成「我」又出现一遍。
+// 所以按系统给每个 IO 块打的时间戳，比相邻两块：这一块比上一块结束晚了 0.05~5 秒，就先补同样长的静音。
+// 只比相邻两块、不累计，长时间录音的时钟漂移不会误触发；超过 5 秒多半是电脑睡了，两路一起停，不用补
+var lastInT: Double = -1         // 上一块第一帧的时刻（秒）
+var lastInFrames = 0             // 上一块的帧数
+var gapFrames = 0                // 补过的静音帧数（锁里改、锁里读）
+let hostTick: Double = {
+    var tb = mach_timebase_info_data_t()
+    mach_timebase_info(&tb)
+    return Double(tb.numer) / Double(tb.denom) / 1e9
+}()
+
+// 一个 IO 块进来。交错的、声道数和开录时一样的直接存；别的（非交错、声道数变了）先排成 ch 声道交错再存。
+// 实时线程：不分配内存、不打印（声道数变了、补了停顿，都由看门狗那边报）
+func ingest(_ abl: UnsafeMutableAudioBufferListPointer, _ ts: UnsafePointer<AudioTimeStamp>?) {
+    guard abl.count > 0 else { return }
+    var src = 0
+    for b in abl { src += max(Int(b.mNumberChannels), 1) }
+    let frames = Int(abl[0].mDataByteSize) / (4 * max(Int(abl[0].mNumberChannels), 1))
+    guard frames > 0 else { return }
+    if let ts = ts, ts.pointee.mFlags.contains(.hostTimeValid) {
+        let t = Double(ts.pointee.mHostTime) * hostTick
+        if lastInT >= 0 {
+            let gap = t - (lastInT + Double(lastInFrames) / rate)
+            if gap > 0.05 && gap < 5 {
+                var left = Int(gap * rate)
+                os_unfair_lock_lock(&lock); gapFrames += left; os_unfair_lock_unlock(&lock)
+                while left > 0 {
+                    let k = min(left, 16384)
+                    push(silence, k * ch, src)
+                    left -= k
+                }
+            }
+        }
+        lastInT = t; lastInFrames = frames
+    }
+    if abl.count == 1 && src == ch {
+        guard let p = abl[0].mData else { return }
+        push(p.assumingMemoryBound(to: Float.self), frames * ch, src)
+        return
+    }
+    guard frames <= 16384 else {           // 超过预分配的拼接缓冲：丢，但要计数，别悄悄丢
+        os_unfair_lock_lock(&lock); overrun += frames; os_unfair_lock_unlock(&lock); return
+    }
+    remix(frames, src, ch, scratch) { k, i in
+        var k = k
+        for b in abl {
+            let n = max(Int(b.mNumberChannels), 1)
+            if k < n { return b.mData.map { $0.assumingMemoryBound(to: Float.self)[i * n + k] } ?? 0 }
+            k -= n
+        }
+        return 0
+    }
+    push(scratch, frames * ch, src)
+}
+// ingest: end
+
+var procID: AudioDeviceIOProcID?
+let st = AudioDeviceCreateIOProcIDWithBlock(&procID, dev, nil) { _, inData, inTime, _, _ in
+    ingest(UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inData)), inTime)
 }
 guard st == noErr, let pid = procID else { errln(L("audiocap：建不了 IOProc（\(st)）", "audiocap: couldn\'t create the IOProc (\(st))")); exit(4) }
 
@@ -668,10 +735,24 @@ var wdLast: UInt64 = 0
 var wdSince = DispatchTime.now()
 let wd = DispatchSource.makeTimerSource(queue: .main)
 wd.schedule(deadline: .now() + 1, repeating: 1)
+var srcChSaid = ch
+var gapSaid = 0
 wd.setEventHandler {
     os_unfair_lock_lock(&lock)
-    let got = delivered
+    let got = delivered, sc = srcChNow, gf = gapFrames
     os_unfair_lock_unlock(&lock)
+    if gf != gapSaid {
+        errln(String(format: L("audiocap：「%@」停顿了 %.2f 秒（换格式时会这样），补上了同样长的静音，和另一路照样对得齐",
+                               "audiocap: \"%@\" paused for %.2f s (this happens when its format changes); filled the same length with silence so it stays aligned with the other track"),
+                     devLabel, Double(gf - gapSaid) / rate))
+        gapSaid = gf
+    }
+    if sc != srcChSaid {                   // 声道数变了：ingest 已经对齐了，这里说一声（实时线程里不能打印）
+        srcChSaid = sc
+        errln(String(format: L("audiocap：「%@」现在交来 %d 声道（多半是别的程序打开了它，比如视频通话），照旧按开录时的 %d 声道交出去，这一路接着录",
+                               "audiocap: \"%@\" now delivers %d channels (most likely another program opened it, such as a video call); still handing over the %d channels it started with, so this track keeps recording"),
+                     devLabel, sc, ch))
+    }
     if got != wdLast { wdLast = got; wdSince = DispatchTime.now(); return }
     let quiet = Double(DispatchTime.now().uptimeNanoseconds - wdSince.uptimeNanoseconds) / 1e9
     if (got == 0 && quiet >= 6) || (got > 0 && quiet >= 4) {
@@ -683,7 +764,9 @@ wd.setEventHandler {
 wd.resume()
 
 // 每半秒把电平写进 --level 指的文件（先写临时文件再改名，读的一方不会读到半截）：
-// {"db": 峰值 dBFS, "zero_since": 从哪一刻起一直是数字零（0 = 现在有声音）, "t": 现在, "frames": 收到的帧数}
+// {"db": 峰值 dBFS, "zero_since": 从哪一刻起一直是数字零（0 = 现在有声音）, "t": 现在, "frames": 收到的帧数,
+//  "overrun": 缓冲满了丢掉的帧数, "ch": 交给下游的声道数, "src_ch": 设备眼下交来的声道数, "fmt_changes": 中途变了几次,
+//  "gap_s": 设备停顿、补上的静音一共几秒}
 // 数字零和「安静」是两回事：真麦克风再安静也有底噪，全零只可能是没接上。
 var levelTimer: DispatchSourceTimer? = nil
 if let lp = levelPath {
@@ -693,14 +776,14 @@ if let lp = levelPath {
     t.setEventHandler {
         os_unfair_lock_lock(&lock)
         let pk = winPeak; winPeak = 0; let fr = delivered
-        let lft = lastFrameT, t0 = firstFrameT, ov = overrun
+        let lft = lastFrameT, t0 = firstFrameT, ov = overrun, sc = srcChNow, fc = fmtChanges, gf = gapFrames
         os_unfair_lock_unlock(&lock)
         let now = Date().timeIntervalSince1970
         if pk == 0 { if zeroSince == 0 { zeroSince = now } } else { zeroSince = 0 }
         let db = pk > 0 ? 20 * log10(Double(pk)) : -120
         let line = String(format: "{\"db\": %.1f, \"zero_since\": %.0f, \"t\": %.0f, \"frames\": %llu, "
-                          + "\"last_frame_t\": %.0f, \"t0\": %.3f, \"overrun\": %d}\n",
-                          db, zeroSince, now, fr, lft, t0, ov)
+                          + "\"last_frame_t\": %.0f, \"t0\": %.3f, \"overrun\": %d, \"ch\": %d, \"src_ch\": %d, \"fmt_changes\": %d, \"gap_s\": %.2f}\n",
+                          db, zeroSince, now, fr, lft, t0, ov, ch, sc, fc, Double(gf) / rate)
         let tmp = lp + ".tmp"
         if FileManager.default.createFile(atPath: tmp, contents: line.data(using: .utf8)) { rename(tmp, lp) }
     }
