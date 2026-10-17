@@ -77,6 +77,7 @@ MEDIA_TYPE = {".m4a": "audio/mp4", ".m4b": "audio/mp4", ".mp4": "video/mp4", ".m
 DIALOGUE = re.compile(r"^\[[0-9:]+\] ([^：]{1,12})：")
 
 _dur_lock = threading.Lock()
+_lost_logged = threading.Event()     # 「读不了自己的文件」只记一次，别每个请求刷一屏 traceback
 
 
 def log(msg):
@@ -597,14 +598,21 @@ def save_upload(name, length, rfile, mtime=None):
     return dest
 
 
+PHONE_NO_ACCESS = L("录音台读不了语音备忘录：macOS 只让有「完整磁盘访问权限」的终端读它。在终端里跑 rex phone "
+                    "导进来，导进来的录音这里都看得到、能处理",
+                    "The Recording Desk can't read Voice Memos: macOS only lets a terminal with Full Disk Access read "
+                    "them. Run rex phone in a terminal to import them; imported recordings show up and can be processed here")
+
+
 def phone_list():
+    # 常驻的录音台（launchd 起的，rex app）没有那项权限：碰都不碰，免得系统替 python 弹一个莫名其妙的授权框
+    if os.environ.get("REX_APP_DAEMON"):
+        return {"ok": False, "msg": PHONE_NO_ACCESS}
     try:
         files = [os.path.join(VM_DIR, f) for f in os.listdir(VM_DIR)
                  if os.path.splitext(f)[1].lower() in (".m4a", ".qta", ".wav")]
     except PermissionError:
-        return {"ok": False, "msg": L("读不了语音备忘录（隐私权限）。从终端跑 rex app 起服务就行——终端有这个权限",
-                                      "Can't read Voice Memos (privacy permission). Start the server from a terminal "
-                                      "with rex app: the terminal has this permission")}
+        return {"ok": False, "msg": PHONE_NO_ACCESS}
     except OSError:
         return {"ok": False, "msg": L("找不到语音备忘录的同步目录（iPhone 上要打开 iCloud → 语音备忘录）",
                                       "Can't find the Voice Memos sync folder (on the iPhone, turn on iCloud → Voice Memos)")}
@@ -717,8 +725,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def send_static(self, name, ctype, set_cookie=False):
         path = os.path.join(STATIC, name)
-        with open(path, "rb") as fh:
-            body = fh.read()
+        try:
+            with open(path, "rb") as fh:
+                body = fh.read()
+        except PermissionError:
+            return self.send_lost_access(name)
         if EN and name == "index.html":
             # 页面语言在这里定：app.js 按 <html lang> 挑中英文，文件本身不动。<title>录音台</title> 也不能动——
             # rex.sh 的 app_up 靠这个确切的字符串认出端口上是录音台；英文的标题由 app.js 设 document.title
@@ -734,6 +745,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(body)
+
+    # 代码在「文稿」里（macOS 隐私保护）：读得到它，靠的是起录音台的那个程序（终端、Claude）有这个权限。那个程序
+    # 一退出，还在跑的录音台就被收回权限，页面、开录、处理都读不到文件（2026-10-16 Claude 重启后就这样）。
+    # 自己修不了——重新执行还是同一个「负责的程序」——只能说清楚。rex app 认得出这种卡住的进程，停掉再起一个。
+    # 这一页不能带 <title>录音台</title>：rex.sh 的 app_up 靠它判断录音台好着
+    def send_lost_access(self, name):
+        if not _lost_logged.is_set():
+            _lost_logged.set()
+            log(L("读不了 %s：起录音台的程序退出了，macOS 收回了它读「文稿」的权限。在终端里跑 rex app 会重起它",
+                  "Can't read %s: the program that started the Recording Desk has quit, so macOS took back its access to "
+                  "Documents. Run rex app in a terminal to restart it") % name)
+        title = L("录音台需要重起", "The Recording Desk needs a restart")
+        body = ("<!doctype html><html lang=\"%s\"><meta charset=\"utf-8\"><title>%s</title>"
+                "<body style=\"font:16px/1.6 -apple-system,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem\">"
+                "<h1 style=\"font-size:1.2rem\">%s</h1><p>%s</p><pre style=\"font-size:1rem\">rex app</pre></body></html>") % (
+            "en" if EN else "zh-CN", title, title,
+            L("录音台还开着，但读不到自己的文件了：它的代码在「文稿」里，起它的那个程序（终端或 Claude）退出以后，"
+              "macOS 就收回了这个权限。录音和稿子都没事。在终端里跑下面这条，它会停掉卡住的这个、重起一个，然后刷新这一页：",
+              "The Recording Desk is still running but can no longer read its own files: its code is in Documents, and "
+              "when the program that started it (a terminal or Claude) quit, macOS took that access back. Your recordings "
+              "and transcripts are fine. Run this in a terminal; it stops the stuck one and starts a new one. Then reload "
+              "this page:"))
+        data = body.encode("utf-8")
+        self.send_response(503)
+        self.send_header("Content-Type", "text/html; charset=utf-8" if name.endswith(".html") else "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
 
     def send_media(self, path):
         size = os.path.getsize(path)

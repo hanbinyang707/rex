@@ -402,7 +402,7 @@ It opens a web page that runs only on your machine (`http://127.0.0.1:8790`). In
 
 - **Recording**: three buttons at the top—**"我 + 对方"** (Me + Other side; for calls and meetings: your microphone + computer audio, each side saved on its own track), "只录电脑声音" (Computer audio only; for online classes and videos, **does not record your microphone**), and "只录我" (Only me; for face-to-face conversations). For phone calls and meetings, always use "我 + 对方". While recording, the top bar shows the duration, a live level bar for each track, and "停止" (Stop): if your microphone has no signal, or capture on any track stops, it turns red right away; if the computer isn't playing any sound at the moment, it shows a gray "没声音" (No sound). Starting a recording takes a few seconds, and clicking repeatedly during that time won't start a second one
 - **Adding files**: dragging an audio file into the window is the same as putting it in the inbox: automatic transcription → diarization → proofreading → analysis
-- **Recordings on your phone**: expand the section at the bottom left to list your Voice Memos recordings (with location names); click "导入" (Import) to fetch one and process it
+- **Recordings on your phone**: import Voice Memos with `rex phone` in a terminal (reading them needs Full Disk Access, which belongs to the terminal app; the background Recording Desk doesn't have it). Once imported, they show up here and are processed as usual
 - **Viewing a recording**: the transcript is color-coded by speaker, and clicking a timestamp plays from that point; automatically corrected words have a green background (hover to see the original), and those awaiting confirmation have a yellow background
 - **Confirming proofreading item by item**: on the "校对" (Proofreading) page, every item Claude is uncertain about offers "采纳 / 不采纳" (Accept / Reject); on the keyboard, `Y` accepts, `N` rejects, `J` / `K` move to the next / previous item, and Space plays that sentence; changes can be reverted with "撤销" (Undo). The edits are made to the transcript file itself, and the report updates to match. To take all the remaining suggestions at once, click "全部采纳" (Accept all) next to the "To confirm" heading; anything whose original text is gone or appears more than once in its line is skipped and left for you
 - **Analysis**: the rendered analysis report, with clickable timestamps
@@ -413,8 +413,8 @@ It opens a web page that runs only on your machine (`http://127.0.0.1:8790`). In
 
 A few notes:
 
-- Start it by running `rex app` from a terminal (it keeps running after you close the terminal). The recording permissions (microphone, system audio) belong to the recording program "rex 录音采集" (rex audio capture) itself, so it makes no difference where you start it from; only "Full Disk Access", which is needed to read the iPhone Voice Memos folder, is still granted per terminal, so start it from the terminal that has that permission
-- Stop it with `rex app stop` and check its status with `rex app status`; the log is at `~/Library/Logs/rex-app.log`
+- **It stays running in the background**: run `rex app` once and macOS's launchd takes over. It starts at login and restarts if it crashes, and closing the terminal or quitting Claude doesn't affect it. It runs the copy of the scripts outside Documents (`~/.local/share/rex-runtime`), so it can't lose access to its own files when the program that started it quits (before 2026-10-16 it could; see section 9). The recording permissions (microphone, system audio) belong to the recording program "rex 录音采集" (rex audio capture) itself, which also lives outside Documents (`~/.local/share/rex/bin`); `rex` in the terminal and the Recording Desk use the same one, so one grant covers both
+- Turn it off completely with `rex app stop` (it no longer starts at login; run `rex app` to bring it back), check its status with `rex app status`; the log is at `~/Library/Logs/rex-app.log`. After changing the code in the repository, `rex app restart` makes it use the new code
 - It only listens on this machine, so other computers can't connect; other web pages in your browser can't control it either (it requires a token and checks the request origin)
 
 ### Export to Word or subtitles: `rex export`
@@ -919,6 +919,14 @@ Check whether it really is recording. If the process is gone but the state file 
 
 Select it again manually in the menu bar. The next time `rex` starts, it automatically cleans up leftover temporary devices.
 
+### The Recording Desk suddenly stopped working (it was fine before)
+
+The page won't load, `rex app status` says the Recording Desk is "stuck", and the log shows `PermissionError: Operation not permitted`.
+Your recordings and transcripts are fine. This is the Recording Desk from before 2026-10-17: it ran the code in the Documents folder, and macOS only lets the program that started it
+(a terminal app, or Claude) read there. Once that program quit entirely (an update restart, for example), the running Recording Desk could no longer read its own page and scripts.
+
+Run `rex app` once in a terminal: it recognizes the stuck one, stops it and switches to the background one (after that this no longer happens).
+
 ---
 
 ## 10. Environment variables
@@ -943,7 +951,8 @@ Select it again manually in the menu bar. The next time `rex` starts, it automat
 | `REX_LANGS` | `zh,en` | Which languages transcription recognizes; when detection fails, the first one is used |
 | `REX_APP_PORT` / `REX_APP_LOG` | `8790` / `~/Library/Logs/rex-app.log` | Port and log of the Recording Desk |
 | `REX_INBOX_LABEL` / `REX_INBOX_LOG` | `local.rex.inbox` / `~/Library/Logs/rex-inbox.log` | launchd label and log of the inbox background job |
-| `REX_RUNTIME` | `~/.local/share/rex-runtime` | Where the copies of the scripts used by background jobs are kept |
+| `REX_RUNTIME` | `~/.local/share/rex-runtime` | Where the copies of the scripts used by background jobs (the inbox watcher, the background Recording Desk) are kept |
+| `REX_BIN_DIR` | `~/.local/share/rex/bin` | Where the compiled audiocap / audiodev go (must be outside Documents; moving them needs permission again) |
 | `REX_LINK_PORT` / `REX_LINK_HTTPS` / `REX_LINK_LOG` | `8791` / `8443` / `~/Library/Logs/rex-link.log` | `rex link`: local port, the https port tailscale serve exposes, and the log |
 
 ---
@@ -960,13 +969,14 @@ After installing BlackHole, you need to **reboot once**. `switchaudio-osx` isn't
 |---|---|
 | `tools/rex.sh` | The main script, symlinked to `~/.local/bin/rex` |
 | `tools/audiodev.swift` | Queries/switches audio devices and builds multi-output devices on the fly. Compiled automatically on first run |
-| `tools/.bin/audiodev` | Build output, **not committed to version control**; recompiled automatically when the source changes |
+| `~/.local/share/rex/bin/audiodev` | Build output (outside Documents); recompiled automatically when the source changes |
 | `tools/whisper-prompt.txt` | The prompt vocabulary list |
 | `tools/whisper-fix.txt` | Deterministic replacements applied after transcription |
 | `tools/keywords.py` | Extracts keywords from transcripts, used to name files |
 | `tools/audiocap.swift` | **Audio capture**: reads devices directly through CoreAudio and passes the audio through a named pipe to ffmpeg for encoding. Compiled automatically on first run |
 | `tools/audiocap-Info.plist` | The program name "rex 录音采集" (rex audio capture) and two usage descriptions, linked into `audiocap`; the system needs them to show the permission prompts |
-| `tools/.bin/audiocap` | Build output, **not committed to version control**; recompiled automatically when the source or the plist changes (after a recompile you have to grant permission once more) |
+| `~/.local/share/rex/bin/audiocap` | Build output (outside Documents; `rex` in the terminal and the background Recording Desk share this one). Recompiled only when the content of the source or the plist changes (judged by a fingerprint of the content, so git refreshing file times doesn't count). The permissions are recorded for this path: after a rebuild or a move it needs permission once more |
+| `~/Library/LaunchAgents/local.rex.app.plist` | launchd configuration of the background Recording Desk; written by `rex app`, removed by `rex app stop` |
 | `tools/whisper_run.py` | The main transcription program: detects the language, segments, calls whisper-cli, and stitches the results back onto the timeline |
 | `tools/podcast_url.py` | `rex url`: finds the audio URL on a podcast page and downloads it |
 | `tools/rex_trim.py` | `rex trim`: cuts off the silence at the end |

@@ -487,7 +487,7 @@ rex app
   录着的时候顶栏显示时长、每一路一根实时电平条和「停止」：你的麦克风没信号、或者哪一路采集停了，
   当场标红；电脑这会儿没放声音显示灰色「没声音」。开录要几秒，这期间连点不会开出第二条
 - **加文件**：把音频文件拖进窗口，等于放进收件箱，自动转写 → 分人 → 校对 → 分析
-- **手机里的录音**：左下展开，列出语音备忘录（带地点名），点「导入」就取出来处理
+- **手机里的录音**：语音备忘录要在终端里 `rex phone` 导入（读它要「完整磁盘访问权限」，那是给终端 App 的，常驻后台的录音台没有）；导进来的这里照常看、照常处理
 - **看一条**：稿子按说话人分颜色，点时间从那里播放；自动改过的词绿底（鼠标停上去看原文），待确认的黄底
 - **逐条确认校对**：「校对」页里，Claude 拿不准的每一条都有「采纳 / 不采纳」，键盘 `Y` 采纳、`N` 不采纳、
   `J` / `K` 下一条 / 上一条、空格听这一句；改了的可以「撤销」。改的就是稿子文件本身，报告跟着更新。剩下的想一次全收：点「待你确认」旁边的「全部采纳」——原文找不到了、
@@ -501,10 +501,12 @@ rex app
 
 几点说明：
 
-- 从终端里跑 `rex app` 起它（关了终端它也接着跑）。录音的权限（麦克风、系统声音）记在录音程序
-  「rex 录音采集」自己头上，从哪起都一样；只有读 iPhone 语音备忘录目录要的「完整磁盘访问权限」
-  还是按终端给的，所以从那个有权限的终端起
-- 关掉 `rex app stop`，看状态 `rex app status`，日志在 `~/Library/Logs/rex-app.log`
+- **常驻在后台**：跑一次 `rex app`，它就交给 macOS 的 launchd 管——开机自动起、崩了自动重起，关终端、退出 Claude
+  都不影响。跑的是「文稿」外面那份脚本副本（`~/.local/share/rex-runtime`），所以不会因为起它的程序退出而读不到
+  自己的文件（2026-10-16 以前会，见第九节）。录音的权限（麦克风、系统声音）记在录音程序「rex 录音采集」自己头上，
+  它也在「文稿」外面（`~/.local/share/rex/bin`），终端里的 `rex` 和录音台用的是同一个，授权一次两边都能录
+- 彻底关掉 `rex app stop`（开机也不再起，要用时再 `rex app`），看状态 `rex app status`，日志在 `~/Library/Logs/rex-app.log`。
+  改了仓库里的代码，`rex app restart` 让它用上
 - 只开在本机，别的电脑连不上；浏览器里别的网页也调不动它（有口令、核对来源）
 
 ### 导出成 Word 或字幕：`rex export`
@@ -1137,6 +1139,14 @@ rex status
 
 菜单栏手动选回去。下次 `rex` 启动时会自动清理残留的临时设备。
 
+### 录音台突然打不开了（之前好好的）
+
+网页打不开，`rex app status` 说录音台「卡住了」，日志里是 `PermissionError: Operation not permitted`。
+录音和稿子都没事。这是 2026-10-17 以前的录音台：它直接跑「文稿」里的代码，macOS 只让起它的那个程序（终端 App，
+或者 Claude）读这里，那个程序整个退出以后（比如更新重启），还开着的录音台就读不到自己的页面和脚本了。
+
+在终端里跑一次 `rex app`：它认得出卡住的那个，停掉，换成常驻后台的（之后就不会再这样）。
+
 ---
 
 ## 十、环境变量
@@ -1161,7 +1171,8 @@ rex status
 | `REX_LANGS` | `zh,en` | 转写认哪些语言；探不出来时按第一个 |
 | `REX_APP_PORT` / `REX_APP_LOG` | `8790` / `~/Library/Logs/rex-app.log` | 录音台的端口和日志 |
 | `REX_INBOX_LABEL` / `REX_INBOX_LOG` | `local.rex.inbox` / `~/Library/Logs/rex-inbox.log` | 收件箱后台任务的 launchd 名字和日志 |
-| `REX_RUNTIME` | `~/.local/share/rex-runtime` | 后台任务用的脚本副本放哪 |
+| `REX_RUNTIME` | `~/.local/share/rex-runtime` | 后台任务（收件箱监视、常驻的录音台）用的脚本副本放哪 |
+| `REX_BIN_DIR` | `~/.local/share/rex/bin` | 编出来的 audiocap / audiodev 放哪（要在「文稿」外面；换了地方要重新授权） |
 | `REX_LINK_PORT` / `REX_LINK_HTTPS` / `REX_LINK_LOG` | `8791` / `8443` / `~/Library/Logs/rex-link.log` | `rex link`：本机端口、tailscale serve 对外开的 https 端口、日志 |
 
 ---
@@ -1180,13 +1191,14 @@ BlackHole 装完要**重启一次**。`switchaudio-osx` 不需要——设备切
 |---|---|
 | `tools/rex.sh` | 主脚本，软链到 `~/.local/bin/rex` |
 | `tools/audiodev.swift` | 查/切音频设备、现建多输出设备。首次运行自动编译 |
-| `tools/.bin/audiodev` | 编译产物，**不进版本库**，源码变了自动重编 |
+| `~/.local/share/rex/bin/audiodev` | 编译产物（在「文稿」外面），源码变了自动重编 |
 | `tools/whisper-prompt.txt` | 提示词表 |
 | `tools/whisper-fix.txt` | 转写后的确定性替换 |
 | `tools/keywords.py` | 从转写稿抽关键词，用来给文件起名 |
 | `tools/audiocap.swift` | **录音采集**：CoreAudio 直读设备，经命名管道交给 ffmpeg 编码。首次运行自动编译 |
 | `tools/audiocap-Info.plist` | 链接进 `audiocap` 的程序名「rex 录音采集」和两条用途说明，系统弹授权框要用 |
-| `tools/.bin/audiocap` | 编译产物，**不进版本库**，源码或 plist 变了自动重编（重编后要重新授权一次） |
+| `~/.local/share/rex/bin/audiocap` | 编译产物（在「文稿」外面，终端里的 `rex` 和常驻的录音台共用这一个）：源码或 plist 的内容变了才重编（按内容的指纹判断，git 刷新修改时间不算）。授权是按这个路径记的，重编或换地方后要重新授权一次 |
+| `~/Library/LaunchAgents/local.rex.app.plist` | 常驻录音台的 launchd 配置，`rex app` 写、`rex app stop` 删 |
 | `tools/whisper_run.py` | 转写主程序：探语言、分段、调 whisper-cli、接回时间轴 |
 | `tools/podcast_url.py` | `rex url`：从播客页面找音频地址并下载 |
 | `tools/rex_trim.py` | `rex trim`：切掉末尾空白 |

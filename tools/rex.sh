@@ -21,8 +21,8 @@
 #   rex auto [status|open|uninstall]     （rex inbox 是 rex in 的别名，不是这个）
 #   rex login [status]  登录 Claude 账号，rex go 的校对和分析用它（终端里的 claude 设置不受影响）；status 看登上没有
 #   rex chat [文件]     接着和那条录音的分析会话聊（不给就是最近一条有分析的）
-#   rex app             打开录音台：本地网页界面，录音、处理、逐条确认校对、接着问都在里面
-#   rex app stop|status|restart
+#   rex app             打开录音台：本地网页界面，录音、处理、逐条确认校对、接着问都在里面。常驻后台、开机自动起
+#   rex app stop|status|restart   关掉（开机也不再起）/ 看状态 / 重起
 #   rex link            用手机录：开 tailscale serve、打二维码，手机扫码就能录，边录边传回来走 rex go
 #   rex link stop|status|new-token
 #   rex export [文件] [docx|srt]   把稿子导出成 Word（写在录音旁边）或给出字幕文件；不给文件就是最近一条
@@ -118,10 +118,14 @@ if [ -L "$SELF" ]; then
 fi
 TOOLS_DIR=$(cd "$(dirname "$SELF")" && pwd)
 AD_SRC="$TOOLS_DIR/audiodev.swift"
-AD="$TOOLS_DIR/.bin/audiodev"
 CAP_SRC="$TOOLS_DIR/audiocap.swift"
 CAP_PLIST="$TOOLS_DIR/audiocap-Info.plist"   # 程序名和麦克风/系统声音的用途说明，链接进二进制，弹授权框要用
-CAP="$TOOLS_DIR/.bin/audiocap"
+# 编出来的 audiodev / audiocap 放「文稿」外面一个固定的地方：终端里的 rex、常驻的录音台都用这同一份。
+# 麦克风和系统声音的授权是按 audiocap 的**路径**记的（2026-10-17 实测：同一个二进制拷到别处就成了「还没授权」），
+# 所以只能有一份；而它在仓库（「文稿」）里的话，后台常驻的录音台读不到它
+BIN_DIR="${REX_BIN_DIR:-$HOME/.local/share/rex/bin}"
+AD="$BIN_DIR/audiodev"
+CAP="$BIN_DIR/audiocap"
 
 # whisper。模型不进仓库（547 MB），放缓存目录，缺了就现下。
 # large-v3-turbo 是蒸馏过解码器的版本：比 large-v3 快好几倍，中文识别几乎没退步。
@@ -164,32 +168,63 @@ warnL() { if [ -n "$EN" ]; then warn "$2"; else warn "$1"; fi; }
 dieL()  { if [ -n "$EN" ]; then die "$2"; else die "$1"; fi; }
 need() { command -v "$1" >/dev/null 2>&1 || dieL "找不到 $1。安装：$2" "$1 not found. Install: $2"; }
 
-# audiodev 是本仓库的 Swift 小工具，源码比二进制新就重编。
+# 源码变了才重编：比的是源码内容的指纹（记在二进制旁边的 .src 里），不是修改时间——git 切分支、重写历史、
+# 重新克隆都会刷新修改时间，按时间判就会平白重编，而 audiocap 一重编就得重新授权
+src_hash() { cat "$@" | shasum -a 256 | cut -c1-16; }
+
+# audiodev 是本仓库的 Swift 小工具
 ensure_ad() {
-  if [ ! -x "$AD" ] || [ "$AD_SRC" -nt "$AD" ]; then
-    need swiftc "$(L '装 Xcode 命令行工具：xcode-select --install' 'xcode-select --install (Xcode command line tools)')"
-    mkdir -p "$(dirname "$AD")"
-    sayL "${C_D}编译 audiodev…${C_0}" "${C_D}Compiling audiodev…${C_0}"
-    swiftc -O -o "$AD" "$AD_SRC" || dieL "编译 audiodev 失败" "Failed to compile audiodev"
-  fi
+  h=$(src_hash "$AD_SRC")
+  [ -x "$AD" ] && [ "$(cat "$AD.src" 2>/dev/null)" = "$h" ] && return 0
+  need swiftc "$(L '装 Xcode 命令行工具：xcode-select --install' 'xcode-select --install (Xcode command line tools)')"
+  mkdir -p "$BIN_DIR"
+  sayL "${C_D}编译 audiodev…${C_0}" "${C_D}Compiling audiodev…${C_0}"
+  swiftc -O -o "$AD.tmp.$$" "$AD_SRC" || { rm -f "$AD.tmp.$$"; dieL "编译 audiodev 失败" "Failed to compile audiodev"; }
+  mv -f "$AD.tmp.$$" "$AD" && printf '%s\n' "$h" > "$AD.src"
 }
 
 ensure_cap() {
-  if [ ! -x "$CAP" ] || [ "$CAP_SRC" -nt "$CAP" ] || [ "$CAP_PLIST" -nt "$CAP" ]; then
-    need swiftc "$(L '装 Xcode 命令行工具：xcode-select --install' 'xcode-select --install (Xcode command line tools)')"
-    mkdir -p "$(dirname "$CAP")"
-    sayL "${C_D}编译 audiocap…${C_0}" "${C_D}Compiling audiocap…${C_0}"
-    # Info.plist 链接进二进制，再用 codesign 重签一次把它绑进签名：macOS 弹授权框时从签名里读程序名
-    # 和用途说明，链接器自带的 ad-hoc 签名不绑 Info.plist（codesign -dvvv 看到 Info.plist=not bound）。
-    # 重编之后 cdhash 变了，系统会把它当新程序，麦克风/系统声音要重新授权一次（audiocap.swift「权限」一节）
-    # 编到临时文件、签完再原子换上：中途失败不留一个「比源码新、却没绑 Info.plist」的半成品（那样不会再重编，
-    # 系统也不弹授权框）；录音中 rex check 触发重编也不会把正在跑的二进制换掉
-    swiftc -O -o "$CAP.tmp.$$" "$CAP_SRC" \
-      -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$CAP_PLIST" || { rm -f "$CAP.tmp.$$"; dieL "编译 audiocap 失败" "Failed to compile audiocap"; }
-    codesign -s - -f "$CAP.tmp.$$" 2>/dev/null || { rm -f "$CAP.tmp.$$"; dieL "签名 audiocap 失败" "Failed to sign audiocap"; }
-    mv -f "$CAP.tmp.$$" "$CAP"
-    warnL "audiocap 重编了：下次录音 / rex check 会再问一次麦克风和系统声音的授权（授权记在它自己头上）" "audiocap was rebuilt: the next recording / rex check will ask again for microphone and system audio permission (the permission belongs to audiocap itself)"
+  h=$(src_hash "$CAP_SRC" "$CAP_PLIST")
+  [ -x "$CAP" ] && [ "$(cat "$CAP.src" 2>/dev/null)" = "$h" ] && return 0
+  # 还没记指纹的（这个版本以前编的）：比源码和 plist 都新，就是照现在的源码编的——认下来接着用，不平白重编。
+  # 以前编在仓库的 tools/.bin 里，拷过来是同一个二进制；但授权按路径记，换了地方要重新授权（CAP_NEW，见 cap_grant）
+  if [ ! -f "$CAP.src" ]; then
+    for b in "$CAP" "$TOOLS_DIR/.bin/audiocap"; do
+      [ -x "$b" ] && [ "$b" -nt "$CAP_SRC" ] && [ "$b" -nt "$CAP_PLIST" ] || continue
+      if [ "$b" != "$CAP" ]; then
+        mkdir -p "$BIN_DIR" && cp -p "$b" "$CAP.tmp.$$" && mv -f "$CAP.tmp.$$" "$CAP" || { rm -f "$CAP.tmp.$$"; break; }
+        CAP_NEW=1
+        warnL "audiocap 挪到了「文稿」外面（${BIN_DIR}）：录音台常驻后台也用得到它。授权按路径记，麦克风和系统声音要重新点一次「允许」。" "audiocap moved out of Documents (${BIN_DIR}) so the background Recording Desk can use it too. macOS keeps permissions per path, so microphone and system audio need one more click on Allow."
+      fi
+      printf '%s\n' "$h" > "$CAP.src"
+      return 0
+    done
   fi
+  need swiftc "$(L '装 Xcode 命令行工具：xcode-select --install' 'xcode-select --install (Xcode command line tools)')"
+  mkdir -p "$BIN_DIR"
+  sayL "${C_D}编译 audiocap…${C_0}" "${C_D}Compiling audiocap…${C_0}"
+  # Info.plist 链接进二进制，再用 codesign 重签一次把它绑进签名：macOS 弹授权框时从签名里读程序名
+  # 和用途说明，链接器自带的 ad-hoc 签名不绑 Info.plist（codesign -dvvv 看到 Info.plist=not bound）。
+  # 重编之后 cdhash 变了，系统会把它当新程序，麦克风/系统声音要重新授权一次（audiocap.swift「权限」一节）
+  # 编到临时文件、签完再原子换上：中途失败不留一个半成品；录音中 rex check 触发重编也不会把正在跑的二进制换掉
+  swiftc -O -o "$CAP.tmp.$$" "$CAP_SRC" \
+    -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$CAP_PLIST" || { rm -f "$CAP.tmp.$$"; dieL "编译 audiocap 失败" "Failed to compile audiocap"; }
+  codesign -s - -f "$CAP.tmp.$$" 2>/dev/null || { rm -f "$CAP.tmp.$$"; dieL "签名 audiocap 失败" "Failed to sign audiocap"; }
+  mv -f "$CAP.tmp.$$" "$CAP" && printf '%s\n' "$h" > "$CAP.src"
+  CAP_NEW=1
+  warnL "audiocap 重编了：麦克风和系统声音要重新授权一次（授权记在它自己头上）" "audiocap was rebuilt: microphone and system audio need permission once more (the permission belongs to audiocap itself)"
+}
+
+# 两项授权各要一次：先系统声音（录系统声音走的是系统音频接口才要），再麦克风。没问过的弹框、各等两分钟，
+# 问过的直接过。不动「录系统声音走哪条路」的设置——那是 rex check sys 放过测试音才定的（rex check sys
+# 没等到授权会把它改回 BlackHole）。有没拿到的返回非 0
+cap_grant() {
+  g=0
+  if [ "$(sys_path)" = tap ]; then
+    "$CAP" --system --info --request >/dev/null || g=1
+  fi
+  pat=$(mic_pattern mic) && "$CAP" "$pat" --info >/dev/null || g=1
+  return $g
 }
 
 # 起一路采集：audiocap 用 CoreAudio 直读设备 → 命名管道 → ffmpeg。
@@ -581,6 +616,10 @@ start() {
   mode="$1"
   ensure_ad
   mkdir -p "$REX_DIR"
+  # audiocap 刚挪了地方或刚重编（升级后第一次录）：在终端里先把两项授权要下来，免得这一条的系统声音
+  # 退回 BlackHole、麦克风卡在授权框上。录音台里开的不在这儿问（没人看着终端），audiocap 自己会弹框
+  ensure_cap
+  if [ -n "${CAP_NEW:-}" ] && [ -t 0 ]; then cap_grant || true; fi
 
   # 开录这一段加锁。录音台里连点两下、或者两个终端几乎同时开：第二次进来时第一次还没写状态
   # 文件，于是两次都开了，第一次那个成了没人管的孤儿（2026-10-13 两秒内开了两次，孤儿录了 53 分钟）
@@ -1765,8 +1804,33 @@ sync_runtime() {
        -not -path '*/__pycache__/*' -print 2>/dev/null | head -1)" ]; then
     return 0
   fi
-  rsync -a --delete --exclude __pycache__ "$TOOLS_DIR/" "$RUNTIME/tools/" 2>/dev/null \
+  changed=$(rsync -ai --delete --exclude __pycache__ "$TOOLS_DIR/" "$RUNTIME/tools/" 2>/dev/null) \
     && touch "$RUNTIME/.synced"
+  # 常驻的录音台从这份副本跑：页面文件每次现读，跟着就是新的；Python 代码要重起才换
+  case "$changed" in
+    *rex_app.py*|*proofread.py*|*claude_cli.py*|*rex_export.py*|*i18n.py*)
+      [ -f "$HOME/Library/LaunchAgents/${REX_APP_LABEL:-local.rex.app}.plist" ] \
+        && sayL "${C_D}录音台的程序更新了：rex app restart 让它用上${C_0}" "${C_D}The Recording Desk's code was updated: rex app restart to use it${C_0}" >&2 ;;
+  esac
+  return 0
+}
+
+# 没有就建（收件箱监视、常驻录音台、手机录音服务都要它），有就照常同步
+ensure_runtime() {
+  case "$TOOLS_DIR" in "$RUNTIME"/*) return 0 ;; esac
+  [ -d "$RUNTIME/tools" ] && { sync_runtime; return 0; }
+  mkdir -p "$RUNTIME/tools"
+  rsync -a --delete --exclude __pycache__ "$TOOLS_DIR/" "$RUNTIME/tools/" && touch "$RUNTIME/.synced"
+}
+
+# launchd 起的进程 PATH 只有系统目录：把 ffmpeg / whisper / python3 / claude 所在的目录写死进去
+launchd_path() {
+  lp=""
+  for b in ffmpeg whisper-cli python3 claude; do
+    d=$(dirname "$(command -v "$b" 2>/dev/null || echo /usr/bin/x)")
+    case ":$lp:" in *":$d:"*) ;; *) lp="${lp:+$lp:}$d" ;; esac
+  done
+  printf '%s\n' "$lp:/usr/bin:/bin:/usr/sbin:/sbin"
 }
 
 # 静默通知（不加提示音：可能正在录别的东西）。双引号会打断 AppleScript，先换掉。
@@ -2056,16 +2120,23 @@ login_cmd() {
 
 # ------------------------------------------------------------------ 录音台（rex app）
 #
-# 本地网页界面，tools/rex_app.py。从终端起（nohup，关了终端也接着跑）。录音的权限（麦克风、系统声音）
-# 记在 audiocap 自己头上，从哪起都一样；读语音备忘录目录要的「完整磁盘访问权限」还是按终端 App 给的，
-# 所以从有那项权限的终端起。只开在 127.0.0.1，口令和防跨站的做法见 rex_app.py 头部。
+# 本地网页界面，tools/rex_app.py。常驻在后台：交给 launchd（local.rex.app），从「文稿」外面那份脚本副本（${RUNTIME}）
+# 跑，开机自动起、崩了自动重起，不靠哪个终端或 Claude 开着。以前是终端里 nohup 起、直接跑仓库里的代码：仓库在
+# 「文稿」里，macOS 只让起它的那个程序读这里，那个程序一退出，录音台就读不到自己的页面和脚本、卡死（2026-10-16
+# Claude 重启后就这样）。录音的权限（麦克风、系统声音）记在 audiocap 自己头上（${BIN_DIR}，也在「文稿」外面），谁起的
+# 都一样。读语音备忘录要的「完整磁盘访问权限」给的是终端 App，常驻的录音台没有：那一块在终端里 rex phone。
+# 只开在 127.0.0.1，口令和防跨站的做法见 rex_app.py 头部。
 APP_PORT="${REX_APP_PORT:-8790}"
 APP_LOG="${REX_APP_LOG:-$HOME/Library/Logs/rex-app.log}"
-APP_PID="$REX_DIR/.app-$APP_PORT.pid"   # 起服务时记下的 PID，停的时候只认它（见 app_pid）。按端口分开：测试用的 8791 别和正式的混
+APP_PID="$REX_DIR/.app-$APP_PORT.pid"   # 老版本在终端里起时记下的 PID（见 app_pid）。按端口分开：测试用的 8791 别和正式的混
+APP_LABEL="${REX_APP_LABEL:-local.rex.app}"
+APP_PLIST="$HOME/Library/LaunchAgents/$APP_LABEL.plist"
 app_up() {   # 端口上答应的是录音台吗（别把别的服务当成它）
   page=$(curl -s --max-time 2 "http://127.0.0.1:$APP_PORT/" 2>/dev/null)
   case "$page" in *"<title>录音台</title>"*) return 0 ;; *) return 1 ;; esac
 }
+app_wait() { for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do app_up && return 0; sleep 0.5; done; return 1; }
+app_loaded() { launchctl print "gui/$(id -u)/$APP_LABEL" >/dev/null 2>&1; }
 
 # 录音台服务的 PID：先看起它时记下的，没有就看端口上监听的是谁。两条路都要核对命令行确实是 rex_app.py。
 # **只按确切的 PID 停，不用 pkill -f**：2026-10-13 一条 pkill -f 关掉了 Chrome 和所有终端会话
@@ -2079,31 +2150,95 @@ app_pid() {
   done
   return 1
 }
+app_kill() {   # 只停 app_pid 核对过的那一个
+  kill "$1" 2>/dev/null
+  for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$1" 2>/dev/null || break; sleep 0.3; done
+  kill -0 "$1" 2>/dev/null && kill -KILL "$1" 2>/dev/null
+  rm -f "$APP_PID"
+}
+
+# 进程还在、页面却打不开：老版本在终端里起的那种，起它的程序一退出就这样（日志里是 PermissionError:
+# Operation not permitted），rex app status 说「没开」，rex app 又因为端口被占起不来。多看几秒再判，别把一时忙的当成卡住
+app_stuck() {
+  app_pid >/dev/null || return 1
+  for _ in 1 2 3; do app_up && return 1; sleep 1; done
+  return 0
+}
+
+# launchd 的配置，用 plistlib 写（路径、变量里有什么字符都不怕）。AbandonProcessGroup：录音台重起、关掉时，它排
+# 出去的处理（rex go）接着跑完，不被 launchd 连带杀掉；开录本来就在独立的进程组里（rex_app.py 的 run_rex）
+app_plist() {
+  python3 - "$APP_LABEL" "$(command -v python3)" "$RUNTIME/tools/rex_app.py" "$(launchd_path)" \
+            "$REX_DIR" "$APP_PORT" "$APP_LOG" <<'PY'
+import os, plistlib, sys
+label, py, script, path, rexdir, port, log = sys.argv[1:8]
+env = {"PATH": path, "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "REX_DIR": rexdir,
+       "REX_APP_PORT": port, "REX_APP_DAEMON": "1"}
+# 在终端里设过的 REX_* / WHISPER_MODEL 一起带过去：录音台排出去的 rex.sh 和终端里的一样
+env.update({k: v for k, v in os.environ.items()
+            if (k.startswith("REX_") or k == "WHISPER_MODEL") and k not in env})
+sys.stdout.write(plistlib.dumps({
+    "Label": label, "ProgramArguments": [py, script], "RunAtLoad": True, "KeepAlive": True,
+    "AbandonProcessGroup": True, "WorkingDirectory": "/tmp", "EnvironmentVariables": env,
+    "StandardOutPath": log, "StandardErrorPath": log}).decode())
+PY
+}
+
+# 写好配置（内容变了才重写、重载），没加载就加载。常驻录音台要用的东西在终端里先备齐：脚本副本、audiocap
+# （刚挪出「文稿」或刚重编的话要重新授权，就在这儿当面问掉，别等到开录才卡在授权框上）
+app_install() {
+  ensure_runtime || dieL "拷不出脚本副本到 $RUNTIME" "Failed to copy the scripts to $RUNTIME"
+  ensure_ad; ensure_cap
+  if [ -n "${CAP_NEW:-}" ]; then
+    sayL "马上会弹「rex 录音采集」的授权提示（先录系统声音，再麦克风），都点「允许」。每个等两分钟。" "Permission prompts for \"rex 录音采集\" will appear now (system audio, then microphone); click Allow on each. Each one waits two minutes."
+    cap_grant || warnL "还有没给的授权：之后跑 rex check sys 和 rex check 再要。没给之前开录会停下来问，不会录出一段静音。" "Some permissions are still missing: run rex check sys and rex check later. Until then, a recording stops to ask instead of recording silence."
+  fi
+  mkdir -p "$HOME/Library/LaunchAgents" "$(dirname "$APP_LOG")" "$REX_DIR"
+  new=$(app_plist) || dieL "写不出录音台的 launchd 配置" "Could not write the Recording Desk's launchd configuration"
+  if [ "$new" != "$(cat "$APP_PLIST" 2>/dev/null)" ]; then
+    app_loaded && launchctl bootout "gui/$(id -u)/$APP_LABEL" 2>/dev/null
+    printf '%s\n' "$new" > "$APP_PLIST"
+  fi
+  app_loaded && return 0
+  # 老版本在终端里直接起的那个还占着端口（launchd 不管它）：先停掉，端口让出来
+  for _ in 1 2 3 4 5 6 7 8 9 10; do p=$(app_pid) || break; app_kill "$p"; done
+  launchctl bootstrap "gui/$(id -u)" "$APP_PLIST" 2>/dev/null || launchctl load "$APP_PLIST" 2>/dev/null \
+    || dieL "launchd 没接下录音台：$APP_PLIST" "launchd did not accept the Recording Desk: $APP_PLIST"
+}
 
 app_cmd() {
   case "${1:-open}" in
     open|start)
-      if ! app_up; then
-        mkdir -p "$(dirname "$APP_LOG")" "$REX_DIR"
-        REX_DIR="$REX_DIR" REX_APP_PORT="$APP_PORT" nohup python3 "$TOOLS_DIR/rex_app.py" >> "$APP_LOG" 2>&1 &
-        echo $! > "$APP_PID"
-        for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do app_up && break; sleep 0.5; done
-        app_up || dieL "录音台没起来，看日志：${APP_LOG}（端口 ${APP_PORT} 被占了的话，用 REX_APP_PORT 换一个）" "The Recording Desk did not start; see the log: ${APP_LOG} (if port ${APP_PORT} is taken, choose another one with REX_APP_PORT)"
+      app_install
+      if ! app_wait && app_stuck; then
+        warnL "录音台卡住了：进程还在，页面打不开。重起它。" "The Recording Desk is stuck: the process is alive but the page doesn't load. Restarting it."
+        if app_loaded; then launchctl kickstart -k "gui/$(id -u)/$APP_LABEL" 2>/dev/null; elif p=$(app_pid); then app_kill "$p"; fi
+        app_wait
       fi
+      app_up || dieL "录音台没起来，看日志：${APP_LOG}（端口 ${APP_PORT} 被别的程序占了的话，用 REX_APP_PORT 换一个）" "The Recording Desk did not start; see the log: ${APP_LOG} (if another program holds port ${APP_PORT}, choose another one with REX_APP_PORT)"
       [ "${1:-open}" = start ] || open "http://127.0.0.1:$APP_PORT/"
       sayL "录音台：${C_G}http://127.0.0.1:$APP_PORT/${C_0}" "Recording Desk: ${C_G}http://127.0.0.1:$APP_PORT/${C_0}"
-      sayL "  ${C_D}Safari 里「文件 → 添加到程序坞」，以后从程序坞点开就像一个 App。关掉：rex app stop${C_0}" "  ${C_D}In Safari, File → Add to Dock, and from then on it opens from the Dock like an app. To close it: rex app stop${C_0}"
+      sayL "  ${C_D}常驻在后台：开机自动起，关终端、退出 Claude 都不影响。彻底关掉：rex app stop${C_0}" "  ${C_D}It stays running in the background and starts at login; closing the terminal or quitting Claude doesn't affect it. To turn it off: rex app stop${C_0}"
+      sayL "  ${C_D}Safari 里「文件 → 添加到程序坞」，以后从程序坞点开就像一个 App。${C_0}" "  ${C_D}In Safari, File → Add to Dock, and from then on it opens from the Dock like an app.${C_0}"
       ;;
     stop)
-      if p=$(app_pid); then
-        kill "$p" 2>/dev/null
-        for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$p" 2>/dev/null || break; sleep 0.3; done
-        kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null
-        rm -f "$APP_PID"; sayL "录音台关了。" "Recording Desk stopped."
+      was=""
+      if app_loaded; then launchctl bootout "gui/$(id -u)/$APP_LABEL" 2>/dev/null; was=1; fi
+      if [ -f "$APP_PLIST" ]; then rm -f "$APP_PLIST"; was=1; fi
+      for _ in 1 2 3 4 5 6 7 8 9 10; do p=$(app_pid) || break; app_kill "$p"; was=1; done
+      rm -f "$APP_PID"
+      if [ -n "$was" ]; then sayL "录音台关了，开机也不再自动起（要用时：rex app）。" "Recording Desk stopped, and it no longer starts at login (to use it again: rex app)."
       else sayL "录音台本来就没开。" "The Recording Desk was not running."; fi ;;
-    restart) app_cmd stop; sleep 1; app_cmd open ;;
+    restart)
+      app_install
+      launchctl kickstart -k "gui/$(id -u)/$APP_LABEL" 2>/dev/null
+      app_wait || dieL "录音台没起来，看日志：${APP_LOG}" "The Recording Desk did not start; see the log: ${APP_LOG}"
+      sayL "录音台重起了：${C_G}http://127.0.0.1:$APP_PORT/${C_0}" "Recording Desk restarted: ${C_G}http://127.0.0.1:$APP_PORT/${C_0}" ;;
     status|*)
-      if app_up; then sayL "${C_G}● 开着${C_0} http://127.0.0.1:$APP_PORT/    日志 $APP_LOG" "${C_G}● Running${C_0} http://127.0.0.1:$APP_PORT/    log $APP_LOG"
+      if app_up && app_loaded; then sayL "${C_G}● 开着${C_0}（常驻，开机自动起） http://127.0.0.1:$APP_PORT/    日志 $APP_LOG" "${C_G}● Running${C_0} (in the background, starts at login) http://127.0.0.1:$APP_PORT/    log $APP_LOG"
+      elif app_up; then sayL "${C_G}● 开着${C_0}（终端里起的，不是常驻：跑一次 rex app 换成常驻） http://127.0.0.1:$APP_PORT/" "${C_G}● Running${C_0} (started from a terminal, not in the background: run rex app once to switch) http://127.0.0.1:$APP_PORT/"
+      elif p=$(app_pid); then warnL "录音台卡住了：进程 ${p} 还在，页面打不开。跑 rex app 会重起它" "The Recording Desk is stuck: process ${p} is alive but the page doesn't load. Run rex app to restart it"
+      elif app_loaded; then warnL "常驻的录音台没在答应（launchd 可能正在重起它）：看日志 ${APP_LOG}" "The background Recording Desk isn't answering (launchd may be restarting it): see the log ${APP_LOG}"
       else sayL "○ 没开（打开：rex app）" "○ Not running (start it: rex app)"; fi ;;
   esac
 }
@@ -2140,13 +2275,7 @@ auto_cmd() {
       mkdir -p "$RUNTIME/tools"
       rsync -a --delete --exclude __pycache__ "$TOOLS_DIR/" "$RUNTIME/tools/" && touch "$RUNTIME/.synced" \
         || dieL "拷不出脚本副本到 $RUNTIME" "Failed to copy the scripts to $RUNTIME"
-      # launchd 的 PATH 只有系统目录：装的时候把 ffmpeg / whisper / python3 / claude 所在目录写死
-      lp=""
-      for b in ffmpeg whisper-cli python3 claude; do
-        d=$(dirname "$(command -v "$b" 2>/dev/null || echo /usr/bin/x)")
-        case ":$lp:" in *":$d:"*) ;; *) lp="${lp:+$lp:}$d" ;; esac
-      done
-      lp="$lp:/usr/bin:/bin:/usr/sbin:/sbin"
+      lp=$(launchd_path)
       command -v claude >/dev/null 2>&1 || warnL "  没找到 claude 命令行：转写会照做，校对和分析会跳过" "  claude CLI not found: transcription still runs, proofreading and analysis are skipped"
       cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -2603,7 +2732,9 @@ link_cmd() {
       ts=$(ts_cli) || dieL "没找到 Tailscale。手机录音要经 Tailscale：装好 Tailscale、手机和这台 Mac 登同一个账号，再跑 rex link。" "Tailscale not found. Phone recording goes through Tailscale: install it, sign in on both the phone and this Mac with the same account, then run rex link again."
       if ! link_up; then
         mkdir -p "$(dirname "$LINK_LOG")" "$(dirname "$LINK_PID")" "$REX_DIR"
-        REX_DIR="$REX_DIR" REX_LINK_PORT="$LINK_PORT" nohup python3 "$TOOLS_DIR/rex_link.py" >> "$LINK_LOG" 2>&1 &
+        # 从「文稿」外面那份副本跑：起它的终端关了，它照样读得到自己的页面（见录音台那一节）
+        ensure_runtime || dieL "拷不出脚本副本到 $RUNTIME" "Failed to copy the scripts to $RUNTIME"
+        REX_DIR="$REX_DIR" REX_LINK_PORT="$LINK_PORT" nohup python3 "$RUNTIME/tools/rex_link.py" >> "$LINK_LOG" 2>&1 &
         echo $! > "$LINK_PID"
         for _ in 1 2 3 4 5 6 7 8 9 10; do link_up && break; sleep 0.5; done
         link_up || dieL "手机录音服务没起来，看日志：${LINK_LOG}（端口 ${LINK_PORT} 被占了就用 REX_LINK_PORT 换一个）" "The phone recording service did not start; see ${LINK_LOG} (if port ${LINK_PORT} is taken, choose another with REX_LINK_PORT)"
@@ -2690,8 +2821,8 @@ rex: one command to start recording, one to stop. Microphone, system audio, or b
   rex auto [status|open|uninstall]     (rex inbox is an alias for rex in, not this)
   rex login [status]  Sign in to a Claude account for rex go's proofreading and analysis (your terminal's claude settings are unaffected); status shows whether you are signed in
   rex chat [file]     Continue the analysis session of that recording (no file = the latest one with an analysis)
-  rex app             Open the Recording Desk: a local web UI for recording, processing, confirming proofreading edits one by one, and follow-up questions
-  rex app stop|status|restart
+  rex app             Open the Recording Desk: a local web UI for recording, processing, confirming proofreading edits one by one, and follow-up questions. It stays running in the background and starts at login
+  rex app stop|status|restart   Turn it off (no longer starts at login) / show status / restart
   rex link            Record from your phone: starts tailscale serve and prints a QR code; scan it, record, and the audio streams back here and goes through rex go
   rex link stop|status|new-token
   rex export [file] [docx|srt]   Export the transcript as Word (written next to the recording) or give the subtitle file; no file = the latest one

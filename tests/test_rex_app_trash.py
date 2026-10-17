@@ -1,11 +1,15 @@
 """录音台「双击移到废纸篓」：只动这一条录音的文件、分轨两条一起走、正在录的不动。不碰真的废纸篓。
+还有：录音台读不了自己的文件时（起它的程序退出、macOS 收回「文稿」权限），给一页说明，不掉线。
 
     python3 -m unittest discover -s tests
 """
+import http.client
+import http.server
 import os
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
 
 # 测试不碰真的家目录：锁文件、缓存、~/.config/rex 里的个人词表都按 HOME 找
@@ -66,6 +70,62 @@ class TrashRecording(unittest.TestCase):
 
     def test_nothing_there(self):
         self.assertFalse(rex_app.trash_recording("2026-01-01_000000_mic")[0])
+
+
+@unittest.skipIf(os.geteuid() == 0, "root 打得开权限为 0 的文件，模拟不了")
+class LostAccess(unittest.TestCase):
+    """2026-10-16：起录音台的 Claude 重启了，还在跑的录音台读不了「文稿」里自己的页面，每个请求都掉线，
+    rex app status 说「没开」，rex app 又因为端口被占起不来。现在给一页说明，并且不能冒充好着的录音台。"""
+
+    def setUp(self):
+        self.static = tempfile.mkdtemp()
+        for n in ("index.html", "app.js"):
+            p = os.path.join(self.static, n)
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write("<title>录音台</title>")
+            os.chmod(p, 0)                         # 打开时 PermissionError，和权限被收回时一样
+        self.real = rex_app.STATIC
+        rex_app.STATIC = self.static
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), rex_app.Handler)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        rex_app.STATIC = self.real
+        for n in os.listdir(self.static):
+            os.chmod(os.path.join(self.static, n), 0o600)
+        shutil.rmtree(self.static)
+
+    def get(self, path):
+        c = http.client.HTTPConnection("127.0.0.1", self.srv.server_address[1], timeout=5)
+        c.request("GET", path, headers={"Host": "127.0.0.1:%d" % rex_app.PORT})
+        r = c.getresponse()
+        body = r.read().decode("utf-8")
+        c.close()
+        return r.status, body
+
+    def test_explains_instead_of_dropping(self):
+        st, body = self.get("/")
+        self.assertEqual(st, 503)
+        self.assertIn("rex app", body)
+        self.assertNotIn("<title>录音台</title>", body)   # rex.sh 的 app_up 认这一串；带上了，rex app 就不会重起它
+        self.assertEqual(self.get("/app.js")[0], 503)
+
+
+class Daemon(unittest.TestCase):
+    def test_phone_list_does_not_touch_voice_memos(self):
+        # 常驻的录音台（launchd 起的）没有读语音备忘录的权限：碰都不碰（免得替 python 弹授权框），告诉人用 rex phone
+        real = rex_app.VM_DIR
+        rex_app.VM_DIR = "/nonexistent-should-not-be-read"
+        os.environ["REX_APP_DAEMON"] = "1"
+        try:
+            j = rex_app.phone_list()
+        finally:
+            del os.environ["REX_APP_DAEMON"]
+            rex_app.VM_DIR = real
+        self.assertFalse(j["ok"])
+        self.assertIn("rex phone", j["msg"])
 
 
 if __name__ == "__main__":
