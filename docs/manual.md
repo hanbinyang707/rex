@@ -919,6 +919,14 @@ Check whether it really is recording. If the process is gone but the state file 
 
 Select it again manually in the menu bar. The next time `rex` starts, it automatically cleans up leftover temporary devices.
 
+### Proofreading and analysis fail with `403 Request not allowed` (or `Unable to connect to API`)
+
+The request went out directly from a region Anthropic doesn't serve: without a proxy, Anthropic refuses it (403) or the domain doesn't even resolve (ENOTFOUND).
+The claude CLI only uses a proxy given in environment variables (`HTTPS_PROXY`) and ignores the system proxy; processes started from a terminal usually have that variable, while those started by launchd
+(the inbox watcher, the background Recording Desk) don't. Since 2026-10-18 rex fills it in from the system proxy (the one in the Network settings, which apps like Clash turn on),
+so it's enough that your proxy app is running with the system proxy on. If it still says 403, check whether the proxy app is off; Claude only takes an http(s) proxy, a SOCKS-only setup won't do.
+On a 403 rex stops right away (every part would fail the same way) and the report says why; once the proxy is on, click the redo button in the Recording Desk or run `rex go` again.
+
 ### Recording during a video call (WeChat, FaceTime and the like)
 
 When a call app opens the microphone, it switches the Mac's built-in microphone from 1 to 3 channels (and back when the call ends), and the device pauses for about 0.25 s at each switch;

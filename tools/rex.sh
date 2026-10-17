@@ -1846,7 +1846,8 @@ sync_runtime() {
   # 常驻的录音台从这份副本跑：页面文件每次现读，跟着就是新的；Python 代码要重起才换
   case "$changed" in
     *rex_app.py*|*proofread.py*|*claude_cli.py*|*rex_export.py*|*i18n.py*)
-      [ -f "$HOME/Library/LaunchAgents/${REX_APP_LABEL:-local.rex.app}.plist" ] \
+      # 这一条本身就是 rex app（重起、装）的话不用提醒：$1 是这次的命令名（入口那里传进来）
+      [ "${1:-}" != app ] && [ -f "$HOME/Library/LaunchAgents/${REX_APP_LABEL:-local.rex.app}.plist" ] \
         && sayL "${C_D}录音台的程序更新了：rex app restart 让它用上${C_0}" "${C_D}The Recording Desk's code was updated: rex app restart to use it${C_0}" >&2 ;;
   esac
   return 0
@@ -2129,11 +2130,16 @@ go_cmd() {
 # ANTHROPIC_AUTH_TOKEN……），带着这些变量起来根本不会让你登 Claude 账号——所以清掉再登。
 # 清哪些和 claude_cli.py 的 env() 是同一份名单。登的是 Claude 订阅（--claudeai），只有 rex go
 # 这种清掉变量再调 claude 的地方用它；平时在终端里敲 claude 照旧走原来的设置。
-claude_uargs() {   # 结果在 uargs：env 用的一串 -u 变量名
+claude_uargs() {   # 结果在 uargs：env 用的一串 -u 变量名，后面跟上要补的代理（变量名=值）
   uargs=()
   for v in $(env | sed -n 's/^\(ANTHROPIC_[A-Za-z0-9_]*\)=.*/\1/p') \
            CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_EFFORT_LEVEL; do
     uargs+=( -u "$v" )
+  done
+  # claude 不读系统代理：终端里没设 HTTPS_PROXY 的话照系统代理补上，在国内直连是 403（见 claude_cli.py「代理」）
+  for kv in $(PYTHONPATH="$TOOLS_DIR" python3 -c 'import claude_cli
+for k, v in claude_cli.system_proxy().items(): print("%s=%s" % (k, v))' 2>/dev/null); do
+    uargs+=( "$kv" )
   done
 }
 
@@ -2906,7 +2912,7 @@ EOF
 
 need ffmpeg "brew install ffmpeg"
 need ffprobe "brew install ffmpeg"
-sync_runtime
+sync_runtime "${1:-}"
 
 WAV=""; SPLIT=""; MIC_DEV=""; LANG_OPT="auto"; NOVAD=""; NORENAME=""; TRIM_TO=""; DRY=""; POS=(); WHO=""; GO_INBOX=""
 NAMES="${REX_NAMES:-$(L '我,对方' 'Me,Other')}"

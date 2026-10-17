@@ -12,6 +12,14 @@ Balance`——那是那一家账户的余额；同一时刻收件箱（launchd �
 要的是「拿 Claude 校对」，手册和隐私说明写的也是 Claude，所以默认把这些变量清掉，
 让 claude 命令行用它自己的登录。真想沿用终端里的设置：REX_CLAUDE_ENV=inherit。
 
+## 代理：照系统代理走
+
+claude 命令行只认环境变量里的代理（HTTPS_PROXY），不读 macOS 的系统代理（「网络」设置里的那个，Clash 一类开的
+就是它）。从终端、从 Claude App 起的进程多半带着这个变量；launchd 起的（收件箱监视、常驻的录音台）没有，于是直连
+Anthropic——在国内直连会被拒：2026-10-17 起校对、分析全部 `Failed to authenticate. API Error: 403 Request not
+allowed`，10-15 那次是连域名都解析不了的 ENOTFOUND。同样的请求带上系统代理就通（10-18 实测）。
+所以环境里没设代理时，`env()` 照系统代理补上 HTTPS_PROXY / HTTP_PROXY；代理开关、换端口都跟着走，不用重装。
+
 ## 在空目录里跑：别把工作目录的 CLAUDE.md 带进去
 
 命令行会把工作目录（一路往上）的 CLAUDE.md 自动塞进上下文。作者从自己的仓库里起 `rex go` 时，那是 87 KB 的交接
@@ -36,6 +44,7 @@ import os
 import re
 import subprocess
 import threading
+import urllib.request
 
 from i18n import EN, L
 
@@ -58,6 +67,11 @@ ACCOUNT = [
      L("到了用量上限", "Usage limit reached")),
     (r"API Error: 401\b|invalid x-api-key|authentication_error",
      L("登录失效：终端里跑 rex login 重新登录", "Login expired: run rex login in a terminal to log in again")),
+    # 403 Request not allowed：请求从 Anthropic 不服务的地方直接发过去了（见上面「代理」一节），每一份都会一样
+    (r"API Error: 403\b|Request not allowed",
+     L("Anthropic 拒绝了请求（403）：多半是这台 Mac 没走代理——在国内直连会被拒。rex 照系统代理走，看看代理软件开着没有",
+       "Anthropic refused the request (403): most likely this Mac isn't going through a proxy, and direct connections "
+       "from unsupported regions are refused. rex uses the system proxy, so check that your proxy app is running")),
 ]
 
 
@@ -126,10 +140,32 @@ def usage_note():
     return usage_text(u)
 
 
+def system_proxy():
+    """环境里没设代理时，macOS 系统代理 → claude 认的 HTTPS_PROXY / HTTP_PROXY / NO_PROXY（见文件头「代理」）。
+    claude 只支持 http(s) 代理，系统里只开了 SOCKS 的帮不上。"""
+    if any(os.environ.get(k) for k in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")):
+        return {}
+    sysconf = getattr(urllib.request, "getproxies_macosx_sysconf", None)
+    try:
+        p = sysconf() if sysconf else {}
+    except Exception:  # noqa: BLE001  读不到系统设置就当没有，照旧直连
+        return {}
+    out = {}
+    if p.get("https"):
+        out["HTTPS_PROXY"] = p["https"]
+    if p.get("http"):
+        out["HTTP_PROXY"] = p["http"]
+    if out and not (os.environ.get("NO_PROXY") or os.environ.get("no_proxy")):
+        out["NO_PROXY"] = "localhost,127.0.0.1,::1"
+    return out
+
+
 def env():
     if os.environ.get("REX_CLAUDE_ENV") == "inherit":
         return None
-    return {k: v for k, v in os.environ.items() if not k.startswith(STRIP_PREFIX) and k not in STRIP}
+    e = {k: v for k, v in os.environ.items() if not k.startswith(STRIP_PREFIX) and k not in STRIP}
+    e.update(system_proxy())
+    return e
 
 
 def account_error(text):
