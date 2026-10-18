@@ -2,44 +2,22 @@
 
 **English** | [中文](README.zh-CN.md)
 
-A recorder for macOS that you start and stop with one command. It records your microphone, the computer's audio (calls, meetings, videos), or both. Transcription with whisper.cpp runs on your machine. Each transcript line is labeled with who said it. Optionally, Claude proofreads the transcript and writes an analysis. There is also a local web UI, the Recording Desk (录音台).
+**Record calls, meetings and lectures on your Mac, and get a transcript that knows who said what.** Transcription runs on your machine with whisper.cpp. Optionally, Claude proofreads it as a list of corrections you approve, then writes an analysis you can ask follow-up questions about.
 
-> **Status**: a personal tool, open-sourced as it is. It only runs on macOS and is tested on macOS 26 with Apple Silicon. Command output and the web UI come in **English and Chinese**, following your macOS language. See [Language](#language).
+![The Recording Desk: a call transcript with speaker labels. Green words were corrected automatically; yellow ones wait for your decision](docs/images/desk-en.png)
 
-## Why it exists
+> macOS only (14.2+ for system audio), tested on macOS 26 with Apple Silicon · English and Chinese, following your macOS language · MIT · a personal tool in daily use, open-sourced as it is
 
-Every design decision here comes from a recording that failed without any error message:
+## Highlights
 
-- **ffmpeg's avfoundation input drops ~14% of samples.** The file plays normally, but it is missing about a seventh of the audio. rex reads devices directly through CoreAudio with a small Swift helper, `audiocap`. ffmpeg only encodes.
-- **AirPods automatic switching takes over the output device mid-call.** When you record system audio through a BlackHole multi-output device and the output changes, BlackHole records silence. rex captures system audio with a **Core Audio process tap** (macOS 14.2+), which never touches the output device. If the tap isn't available, it falls back to BlackHole and switches the output back within 2 seconds.
-- **The tap delivers nothing while no app is playing audio.** It doesn't record silence; it delivers no frames at all. `audiocap` writes inaudible silence to the built-in speaker so the tap keeps running.
-- **Permission prompts never appeared.** macOS assigns a command-line tool's privacy permissions to the terminal that launched it. A terminal that doesn't declare system audio capture as a purpose gets no prompt, only zeros. `audiocap` relaunches itself as its own "responsible process" with an embedded Info.plist, so the grants belong to "rex 录音采集".
-- **"Who said this" is recorded, not guessed.** `rex both` stores the mixed audio plus a separate microphone track and system-audio track in one file. The transcript labels come from the tracks, not from a model.
-- **whisper detects the language only once per file.** Chinese/English mixed recordings come out garbled. rex checks the language at several points through the file and transcribes each segment in its own language.
-- **Failures are reported.** A watchdog, live level meters per track, digital-silence detection and notifications tell you when something is wrong. If a recording stops on its own, rex finishes the file and tells you.
+- **Both sides of a call, on separate tracks.** `rex both` records your microphone and the computer's audio (Zoom, WeChat, FaceTime, a video in the browser) into one file with a track for each. The speaker labels in the transcript come from the tracks, not from a guess.
+- **Nothing gets lost without a word.** No dropped samples, no silent recording when AirPods switch devices, no garbled track when a video call grabs the microphone mid-recording. A watchdog and live level meters per track tell you if something goes wrong.
+- **Local transcription.** whisper.cpp (large-v3-turbo) with voice detection, and the language is detected per segment, so mixed Chinese and English comes out right. Recordings made on a single microphone can be split by voice.
+- **Claude proofreads, you decide.** Claude returns only a list of corrections. Small fixes such as homophones are applied; anything bigger waits for you to accept or reject, one by one or all at once. Every change can be undone.
+- **An analysis you can question.** Each recording gets a written analysis, and an Ask box continues the same session ("List the action items with owners").
+- **The Recording Desk.** A local web UI that stays in the background: record, review corrections, search every transcript, export to Word or subtitles. Files dropped into the inbox folder are processed automatically, and you can record from your phone over Tailscale.
 
-## Features
-
-| Command | What it does |
-|---|---|
-| `rex` | Toggle microphone recording (bind it to a hotkey) |
-| `rex both` | Microphone + system audio, one file with separate tracks. **Use this for calls.** |
-| `rex sys` | System audio only (podcasts, videos) |
-| `rex stop` / `rex status` | Stop; check that every track is actually receiving audio |
-| `rex text [file]` | Transcribe locally (whisper.cpp, VAD, segments by language) |
-| `rex who [file] [n]` | Speaker diarization (sherpa-onnx) for single-track multi-person recordings |
-| `rex go [file]` | Transcribe → speakers → Claude proofreading → Claude analysis |
-| `rex auto install` | Watch `~/Recordings/收件箱` (inbox) with launchd; anything dropped there goes through `rex go` |
-| `rex app` | Recording Desk web UI at `http://127.0.0.1:8790`, running in the background and starting at login: record, review corrections (Y/N, or accept all at once), ask follow-up questions, search, double-click a recording to move it to the Trash |
-| `rex link` | **Record from your phone**: prints a QR code; open it in the phone's browser and record. Audio streams back to the Mac and goes through `rex go` (over Tailscale, so only your own devices can reach it) |
-| `rex export [file] [docx\|srt]` | Export a transcript as Word, or get its subtitle file; the Recording Desk and the phone page have the same two buttons |
-| `rex phone` | Import iPhone Voice Memos synced through iCloud |
-| `rex url <link>` | Download a podcast episode's audio and transcribe it |
-| `rex find <word>` | Search all transcripts |
-| `rex trim [file]` | Cut trailing silence (the original goes to the Trash) |
-| `rex check` / `rex check sys` | 3-second self-tests; they also trigger the permission prompts |
-
-Run `rex help` for every option. Full manual: [English](docs/manual.md) · [中文](docs/manual.zh-CN.md).
+![Proofreading: Claude's uncertain suggestions with Accept / Reject, above the corrections it applied](docs/images/proofreading-en.png)
 
 ## Requirements
 
@@ -67,12 +45,48 @@ rex check sys   # system audio: asks for "System Audio Recording Only"; passes =
 rex both      # record a call: you + the other side
 rex stop      # stop; reports peak level and digital silence per track
 rex go        # transcribe → speakers → proofread → analysis, for the latest recording
-rex app       # open the Recording Desk
+rex app       # open the Recording Desk (it then stays in the background and starts at login)
 ```
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `rex` | Toggle microphone recording (bind it to a hotkey) |
+| `rex both` | Microphone + system audio, one file with separate tracks. **Use this for calls.** |
+| `rex sys` | System audio only (podcasts, videos) |
+| `rex stop` / `rex status` | Stop; check that every track is actually receiving audio |
+| `rex text [file]` | Transcribe locally (whisper.cpp, VAD, segments by language) |
+| `rex who [file] [n]` | Speaker diarization (sherpa-onnx) for single-track multi-person recordings |
+| `rex go [file]` | Transcribe → speakers → Claude proofreading → Claude analysis |
+| `rex auto install` | Watch `~/Recordings/收件箱` (inbox) with launchd; anything dropped there goes through `rex go` |
+| `rex app` | Recording Desk web UI at `http://127.0.0.1:8790`, running in the background and starting at login: record, review corrections (Y/N, or accept all at once), ask follow-up questions, search, double-click a recording to move it to the Trash |
+| `rex link` | **Record from your phone**: prints a QR code; open it in the phone's browser and record. Audio streams back to the Mac and goes through `rex go` (over Tailscale, so only your own devices can reach it) |
+| `rex export [file] [docx\|srt]` | Export a transcript as Word, or get its subtitle file; the Recording Desk and the phone page have the same two buttons |
+| `rex phone` | Import iPhone Voice Memos synced through iCloud |
+| `rex url <link>` | Download a podcast episode's audio and transcribe it |
+| `rex find <word>` | Search all transcripts |
+| `rex trim [file]` | Cut trailing silence (the original goes to the Trash) |
+| `rex check` / `rex check sys` | 3-second self-tests; they also trigger the permission prompts |
+
+Run `rex help` for every option. Full manual: [English](docs/manual.md) · [中文](docs/manual.zh-CN.md).
+
+## Why it exists
+
+Every design decision here comes from a recording that failed without any error message:
+
+- **ffmpeg's avfoundation input drops ~14% of samples.** The file plays normally, but it is missing about a seventh of the audio. rex reads devices directly through CoreAudio with a small Swift helper, `audiocap`. ffmpeg only encodes.
+- **AirPods automatic switching takes over the output device mid-call.** When you record system audio through a BlackHole multi-output device and the output changes, BlackHole records silence. rex captures system audio with a **Core Audio process tap** (macOS 14.2+), which never touches the output device. If the tap isn't available, it falls back to BlackHole and switches the output back within 2 seconds.
+- **The tap delivers nothing while no app is playing audio.** It doesn't record silence; it delivers no frames at all. `audiocap` writes inaudible silence to the built-in speaker so the tap keeps running.
+- **Video calls change the microphone mid-recording.** When WeChat or FaceTime opens the built-in microphone for echo cancellation, macOS switches it from 1 to 3 channels (and back when the call ends), and both tracks pause for a moment each time. rex keeps the channel count it started with and fills each pause with the same length of silence, so the tracks stay aligned.
+- **Permission prompts never appeared.** macOS assigns a command-line tool's privacy permissions to the terminal that launched it. A terminal that doesn't declare system audio capture as a purpose gets no prompt, only zeros. `audiocap` relaunches itself as its own "responsible process" with an embedded Info.plist, so the grants belong to "rex 录音采集".
+- **"Who said this" is recorded, not guessed.** `rex both` stores the mixed audio plus a separate microphone track and system-audio track in one file. The transcript labels come from the tracks, not from a model.
+- **whisper detects the language only once per file.** Chinese/English mixed recordings come out garbled. rex checks the language at several points through the file and transcribes each segment in its own language.
+- **Failures are reported.** A watchdog, live level meters per track, digital-silence detection and notifications tell you when something is wrong. If a recording stops on its own, rex finishes the file and tells you.
 
 ## Permissions
 
-- Microphone and system-audio permissions belong to **"rex 录音采集"** (the `audiocap` helper), not to your terminal. They work the same whether rex is started from any terminal, the web UI or launchd.
+- Microphone and system-audio permissions belong to **"rex 录音采集"** (the `audiocap` helper, kept in `~/.local/share/rex/bin`), not to your terminal. They work the same whether rex is started from any terminal, the web UI or launchd.
 - `audiocap` is ad-hoc signed. **Rebuilding it (any change to `audiocap.swift` or `audiocap-Info.plist`) changes its signature, so macOS asks again.** rex warns you when it rebuilds.
 - It uses private APIs: `responsibility_spawnattrs_setdisclaim`, and `TCCAccessPreflight` / `TCCAccessRequest` from TCC.framework. They may break in a future macOS. If the tap stops working, rex falls back to BlackHole for that recording.
 - `rex phone` needs Full Disk Access for the terminal you run it from.
@@ -85,6 +99,12 @@ rex app       # open the Recording Desk
 - The phone service behind `rex link` is a separate process, also bound to `127.0.0.1`, reachable only from your own tailnet through `tailscale serve` (not Funnel, never the public internet).
   It can only receive recordings and files, list recent transcripts and download them; it cannot delete, edit, start a recording or send anything to Claude. The token is in the QR code; `rex link new-token` replaces it.
 - **Recording other people:** consent laws differ (one-party vs. all-party). Tell people you are recording.
+
+## Language
+
+rex speaks English and Chinese: command output, `rex help`, notifications, the Recording Desk web UI, report headings and the prompts it sends to Claude (so proofreading notes and analyses come back in your language). It follows your macOS language: Chinese → Chinese, anything else → English. Override it with `REX_LANG=en` or `REX_LANG=zh`, or put `en` or `zh` in `~/.config/rex/lang`.
+
+A few names stay the same in both languages because they are file formats: the inbox folder `~/Recordings/收件箱`, and the report files `.校对.md` (proofreading) and `.分析.md` (analysis). Code comments are in Chinese. The manual is in [English](docs/manual.md) and [中文](docs/manual.zh-CN.md).
 
 ## Layout
 
@@ -102,7 +122,7 @@ rex app       # open the Recording Desk
 | `tools/whisper-prompt.txt`, `tools/whisper-fix.txt` | Templates for your vocabulary hints and fixed replacements; copy them to `~/.config/rex/` and edit there |
 | `docs/manual.md`, `docs/manual.zh-CN.md` | Full manual (English, Chinese) |
 
-Your recordings and transcripts stay in `~/Recordings`, never in this repo.
+Your recordings and transcripts stay in `~/Recordings`, never in this repo. The screenshots above use made-up demo recordings.
 
 ## Development
 
@@ -112,12 +132,6 @@ bash -n tools/rex.sh
 ```
 
 Code comments explain *why* (in Chinese). Most describe a real failure and how it was found. Read them before changing a threshold.
-
-## Language
-
-rex speaks English and Chinese: command output, `rex help`, notifications, the Recording Desk web UI, report headings and the prompts it sends to Claude (so proofreading notes and analyses come back in your language). It follows your macOS language: Chinese → Chinese, anything else → English. Override it with `REX_LANG=en` or `REX_LANG=zh`, or put `en` or `zh` in `~/.config/rex/lang`.
-
-A few names stay the same in both languages because they are file formats: the inbox folder `~/Recordings/收件箱`, and the report files `.校对.md` (proofreading) and `.分析.md` (analysis). Code comments are in Chinese. The manual is in [English](docs/manual.md) and [中文](docs/manual.zh-CN.md).
 
 ## License
 
