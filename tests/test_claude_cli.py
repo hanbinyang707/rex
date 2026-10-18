@@ -68,6 +68,10 @@ class Env(unittest.TestCase):
         self.assertFalse([k for k in e if k.startswith("ANTHROPIC_")])
         self.assertIn("HTTPS_PROXY", e)
 
+    def test_auto_memory_is_off(self):
+        # 2026-10-19：关着工具的会话里，自动记忆让模型把「写记忆文件」当回答吐出来，真正的回答一个字没有
+        self.assertEqual(claude_cli.env()["CLAUDE_CODE_DISABLE_AUTO_MEMORY"], "1")
+
     def test_inherit_keeps_everything_as_is(self):
         os.environ["REX_CLAUDE_ENV"] = "inherit"
         self.assertIsNone(claude_cli.env())

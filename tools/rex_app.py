@@ -326,20 +326,69 @@ def session_of(prefix):
 
 
 _chat_locks = {}
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# 关着工具的会话里，模型偶尔把工具调用当文字吐出来、然后就收尾了：2026-10-19 命令行的自动记忆还开着时，「接着问」
+# 回来的整段就是 `Write {"file_path": ".../memory/…"}`，再问「继续」是 `Read {…MEMORY.md}`，真正的回答一个字没有。
+# 自动记忆关了以后新会话不会这样（claude_cli.py），可这几轮已经留在会话历史里，接着问它还会照着学
+FAKE_TOOL = re.compile(r'^\s*(Write|Read|Edit|MultiEdit|Bash|Glob|Grep|WebFetch|WebSearch|Task)\s*\n\s*\{\s*"')
 
 
-def chat(key, question):
+def session_file(sid):
+    """命令行把 REX_DIR 下的会话存成 ~/.claude/projects/<目录名里非字母数字都换成 -></会话号>.jsonl"""
+    slug = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(REX_DIR))
+    return os.path.join(os.path.expanduser("~/.claude/projects"), slug, sid + ".jsonl")
+
+
+def analysis_anchor(sid):
+    """分析那一轮回答的消息号：会话里第一条提问（稿子）之后、下一条提问之前的最后一条回答。只读会话文件。
+    「从分析重新开始」用 --resume-session-at 停在这里再 --fork-session：分叉出一个新会话，后面跑偏的问答不带进去，
+    原来的会话一个字不动"""
+    try:
+        with open(session_file(sid), encoding="utf-8") as fh:
+            rows = [json.loads(ln) for ln in fh if ln.strip()]
+    except (OSError, ValueError):
+        return None
+
+    def asks(r):          # 真正的提问（不是工具结果）
+        c = (r.get("message") or {}).get("content")
+        return r.get("type") == "user" and (isinstance(c, str) or (
+            isinstance(c, list) and any(isinstance(b, dict) and b.get("type") == "text" for b in c)
+            and not any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c)))
+    starts = [i for i, r in enumerate(rows) if asks(r)]
+    if not starts:
+        return None
+    end = starts[1] if len(starts) > 1 else len(rows)
+    replies = [r for r in rows[starts[0] + 1:end] if r.get("type") == "assistant" and r.get("uuid")]
+    return replies[-1]["uuid"] if replies else None
+
+
+def chat(key, question, fresh=False):
+    """接着分析那个会话问。fresh：从分析刚做完的那一刻分叉出新会话再问，之前的问答收进 .对话.json 的 earlier"""
     prefix = os.path.join(REX_DIR, key)
-    sid = session_of(prefix)
-    if not sid:
-        return {"ok": False, "msg": L("这条还没有分析，先处理它（rex go）再来问",
-                                      "No analysis yet. Process it first (rex go), then ask")}
+    if fresh:
+        m = None
+        try:
+            m = UUID_RE.search(open(prefix + ".分析.md", encoding="utf-8").read(4000))
+        except OSError:
+            pass
+        base = m.group(0) if m else None
+        anchor = analysis_anchor(base) if base else None
+        if not anchor:
+            return {"ok": False, "msg": L("找不到分析那一轮（会话文件不在了？），没法从分析重新开始",
+                                          "Can't find the analysis turn (is the session file gone?), so it can't start over from the analysis")}
+        head = ["--resume", base, "--resume-session-at", anchor, "--fork-session"]
+    else:
+        sid = session_of(prefix)
+        if not sid:
+            return {"ok": False, "msg": L("这条还没有分析，先处理它（rex go）再来问",
+                                          "No analysis yet. Process it first (rex go), then ask")}
+        head = ["--resume", sid]
     lock = _chat_locks.setdefault(key, threading.Lock())
     if not lock.acquire(blocking=False):
         return {"ok": False, "msg": L("上一个问题还在等回答", "Still waiting for the answer to the previous question")}
     try:
         # 会话存在 REX_DIR 下（analyze.py 的 --cwd），resume 要在那儿跑；ANTHROPIC_* 由 claude_cli 清掉
-        obj = claude_cli.run(["--resume", sid, "--tools", "", "--disable-slash-commands", question], "",
+        obj = claude_cli.run(head + ["--tools", "", "--disable-slash-commands", question], "",
                              CHAT_TIMEOUT, cwd=REX_DIR)
     except claude_cli.AccountError as e:
         return {"ok": False, "msg": e.args[0]}
@@ -349,14 +398,22 @@ def chat(key, question):
         lock.release()
     answer = (obj.get("result") or "").strip()
     c = load_chat(prefix)
-    c["sid"] = obj.get("session_id") or sid
+    if fresh and c.get("turns"):
+        c.setdefault("earlier", []).append({"sid": c.get("sid"), "turns": c["turns"],
+                                            "until": time.strftime("%Y-%m-%d %H:%M")})
+        c["turns"] = []
+    c["sid"] = obj.get("session_id") or c.get("sid") or head[1]
     c.setdefault("turns", []).append({"q": question, "a": answer, "when": time.strftime("%Y-%m-%d %H:%M"),
                                       "cost": obj.get("total_cost_usd")})
     tmp = prefix + ".对话.json.tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(c, fh, ensure_ascii=False, indent=1)
     os.replace(tmp, prefix + ".对话.json")
-    return {"ok": True, "answer": answer}
+    res = {"ok": True, "answer": answer}
+    if FAKE_TOOL.match(answer):
+        res["warn"] = L("这个回答像是被打断了：它想调用工具，可这里没有工具。勾上「从分析重新开始」再问一次",
+                        "This answer looks cut off: it tried to use a tool, and there are none here. Tick “Start over from the analysis” and ask again")
+    return res
 
 
 # ---------------------------------------------------------------- 任务队列：一次跑一个 rex.sh
@@ -937,7 +994,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 q = (data.get("q") or "").strip()
                 if not q:
                     return self.send_json({"ok": False, "msg": L("问点什么", "Ask something")})
-                return self.send_json(chat(key, q))
+                return self.send_json(chat(key, q, bool(data.get("fresh"))))
             if u.path == "/api/record":
                 mode = data.get("mode", "")
                 if mode not in ("sys", "both", "mic"):

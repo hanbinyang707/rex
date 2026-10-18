@@ -20,6 +20,14 @@ Anthropic——在国内直连会被拒：2026-10-17 起校对、分析全部 `F
 allowed`，10-15 那次是连域名都解析不了的 ENOTFOUND。同样的请求带上系统代理就通（10-18 实测）。
 所以环境里没设代理时，`env()` 照系统代理补上 HTTPS_PROXY / HTTP_PROXY；代理开关、换端口都跟着走，不用重装。
 
+## 关掉命令行的「自动记忆」
+
+命令行会按工作目录（分析和「接着问」在 ~/Recordings）往系统提示里加一段：把用户的重要信息存进
+~/.claude/projects/<目录>/memory/ 下的记忆文件。可这里工具是关着的（--tools ""），模型想存就只能把「写文件」
+当成文字吐出来、然后收尾：2026-10-19 录音台「接着问」里请它写一段总结，回来的是一整段 `Write {"file_path":
+".../memory/….md", …}`，再问「继续」，回来的是 `Read {…MEMORY.md}`，真正的回答一个字没有。
+私人录音的内容也不该被它悄悄记进别处。所以 `env()` 一律带上 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1。
+
 ## 在空目录里跑：别把工作目录的 CLAUDE.md 带进去
 
 命令行会把工作目录（一路往上）的 CLAUDE.md 自动塞进上下文。作者从自己的仓库里起 `rex go` 时，那是 87 KB 的交接
@@ -165,6 +173,7 @@ def env():
         return None
     e = {k: v for k, v in os.environ.items() if not k.startswith(STRIP_PREFIX) and k not in STRIP}
     e.update(system_proxy())
+    e["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"      # 见文件头「关掉命令行的自动记忆」
     return e
 
 

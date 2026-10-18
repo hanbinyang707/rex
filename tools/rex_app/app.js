@@ -423,6 +423,7 @@ function paneChat(r) {
     ${r.chat.length ? '' : `<div class="muted">${T('分析那个会话里有整份稿子、校对报告和第一轮分析。问什么都行：「第 40 分钟那段他到底什么意思」「把我说的计划列出来」。', 'The analysis session has the whole transcript, the proofreading report and the first analysis. Ask anything: “What did he really mean around minute 40?” “List the plans I mentioned.”')}</div>`}
     ${r.chat.map(t => `<div class="q">${esc(t.q)}</div><div class="a md">${md(t.a)}</div>`).join('')}
     <div class="ask"><textarea id="ask" placeholder="${T('问点什么…（⌘↩ 发送）', 'Ask something… (⌘↩ to send)')}"></textarea><button class="primary" id="send">${T('问', 'Ask')}</button></div>
+    ${r.chat.length ? `<label class="fresh" title="${T('从分析刚做完的那一刻分叉出一个新会话再问：前面这些问答不再带进去（跑偏了、答非所问时用）。原来的会话和问答都留着', 'Fork a new session from the moment the analysis finished, then ask: the questions above are left out (use it when the chat went off track). The old session and answers are kept')}"><input type="checkbox" id="fresh"> ${T('从分析重新开始', 'Start over from the analysis')}</label>` : ''}
   </div>`;
 }
 
@@ -590,13 +591,17 @@ async function decide(rid, action) {
 async function sendChat() {
   const t = $('#ask'), q = t.value.trim();
   if (!q) return;
+  const fresh = !!($('#fresh') && $('#fresh').checked);
+  if (fresh && !confirm(T('从分析刚做完的那一刻重新开始问？上面这些问答会收起来，接下来的问题不再接着它们。',
+                          'Start over from the moment the analysis finished? The questions above are put away and the next ones no longer follow them.'))) return;
   t.disabled = true; $('#send').disabled = true;
   $('#send').innerHTML = `<span class="spin"></span> ${T('想着呢', 'Thinking…')}`;
   const wait = document.createElement('div');
   wait.className = 'q'; wait.textContent = q;
   t.parentElement.before(wait);
-  const j = await api('/api/chat', { key: S.sel, q });
+  const j = await api('/api/chat', { key: S.sel, q, fresh });
   if (!j.ok) { toast(j.msg, 'bad'); t.disabled = false; $('#send').disabled = false; $('#send').textContent = T('问', 'Ask'); wait.remove(); return; }
+  if (j.warn) toast(j.warn, 'bad', 10000);
   await loadDetail(S.sel, true);
   const box = $('#detail'); box.scrollTop = box.scrollHeight;
 }

@@ -2141,6 +2141,8 @@ claude_uargs() {   # 结果在 uargs：env 用的一串 -u 变量名，后面跟
 for k, v in claude_cli.system_proxy().items(): print("%s=%s" % (k, v))' 2>/dev/null); do
     uargs+=( "$kv" )
   done
+  # 关掉自动记忆：rex chat 也是关着工具接着分析会话聊，不关的话它会把「写记忆文件」当回答吐出来（见 claude_cli.py）
+  uargs+=( CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 )
 }
 
 login_cmd() {
