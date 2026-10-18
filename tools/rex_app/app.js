@@ -486,6 +486,10 @@ async function refresh() {
   renderRecording(j.recording);
   renderJobs(j.jobs, j.inbox);
   if (!S.results) renderList();
+  if (S.want) {                       // 打开页面时网址里带着某一条（见 syncHash）
+    const w = S.want; S.want = null;
+    if (!S.sel && S.list.some(r => r.key === w.key)) { S.pendingTab = w.tab; select(w.key); }
+  }
   // 转写完会按关键词改名（X → X_关键词）。选中的那条从列表里消失了，就跟到新名字上
   if (S.sel && !S.list.some(r => r.key === S.sel)) {
     const moved = S.list.find(r => r.key.startsWith(S.sel + '_'));
@@ -511,9 +515,21 @@ async function loadDetail(key, keepTab) {
   const j = await api('/api/rex?k=' + encodeURIComponent(key));
   if (!j.ok) { toast(j.msg || T('打不开这条', "Couldn't open this recording"), 'bad'); return; }
   if (S.sel !== key) return;
-  if (!keepTab) { S.tab = 'text'; S.focus = 0; }
+  if (!keepTab) { S.tab = S.pendingTab || 'text'; S.pendingTab = null; S.focus = 0; }
   S.rex = j.rex;
   renderDetail();
+  syncHash();
+}
+
+// 网址里记着选中的是哪条、哪一页（#录音名/页签）：刷新页面还停在原处，也能直接打开某一条
+const TABS = ['text', 'proof', 'analysis', 'chat'];
+function syncHash() {
+  const h = S.sel ? '#' + encodeURIComponent(S.sel) + (S.tab && S.tab !== 'text' ? '/' + S.tab : '') : '';
+  if (location.hash !== h) history.replaceState(null, '', h || location.pathname);
+}
+function wantedFromHash() {
+  const [k, tab] = location.hash.slice(1).split('/');
+  try { return k ? { key: decodeURIComponent(k), tab: TABS.includes(tab) ? tab : 'text' } : null; } catch (e) { return null; }
 }
 
 function select(key, t) {
@@ -538,7 +554,7 @@ async function trashRec(key) {
   toast(j.msg, j.ok ? 'ok' : 'bad', j.ok ? 7000 : 5000);
   if (!j.ok) return;
   if (S.sel === key) {
-    S.sel = null; S.rex = null;
+    S.sel = null; S.rex = null; syncHash();
     $('#detail').dataset.key = '';
     $('#detail').innerHTML = `<div class="empty">${T('选一条录音', 'Select a recording')}</div>`;
   }
@@ -690,7 +706,7 @@ document.addEventListener('click', e => {
     select(k); return;
   }
   const tab = e.target.closest('[data-tab]');
-  if (tab) { S.tab = tab.dataset.tab; document.querySelectorAll('.tab').forEach(b => b.classList.toggle('on', b === tab)); renderPane(); return; }
+  if (tab) { S.tab = tab.dataset.tab; document.querySelectorAll('.tab').forEach(b => b.classList.toggle('on', b === tab)); renderPane(); syncHash(); return; }
   const dec = e.target.closest('[data-do]');
   if (dec) { decide(dec.dataset.rid, dec.dataset.do); return; }
   const card = e.target.closest('.card');
@@ -760,5 +776,6 @@ window.addEventListener('drop', e => {
 setInterval(() => { if (S.recording && S.recording.on) refresh(); }, 1000);   // 录音时电平条一秒刷一次
 setInterval(() => { if (!S.recording || !S.recording.on) refresh(); }, 2500);
 setInterval(tickClock, 1000);
+S.want = wantedFromHash();
 refresh();
 loadLogin();
