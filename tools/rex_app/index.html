@@ -61,11 +61,16 @@ main { flex: 1; min-height: 0; display: grid; grid-template-columns: 340px 1fr; 
 aside { border-right: 1px solid var(--line); background: var(--panel2); display: flex; flex-direction: column; min-height: 0; }
 .drop { margin: 12px; border: 1.5px dashed var(--line); border-radius: 12px; padding: 12px; text-align: center; color: var(--muted); font-size: 13px; }
 .drop b { color: var(--text); font-weight: 600; }
+.drop .tip { display: inline-block; margin-top: 4px; font-size: 12px; color: var(--faint); }
 .list { overflow-y: auto; flex: 1; padding: 0 8px 12px; }
 .group { font-size: 12px; color: var(--faint); margin: 14px 8px 6px; }
 .item { padding: 9px 10px; border-radius: 10px; cursor: pointer; margin-bottom: 2px; border: 1px solid transparent; }
 .item:hover { background: var(--panel); }
 .item.sel { background: var(--panel); border-color: var(--line); box-shadow: var(--shadow); }
+.item.picked { background: var(--accent-soft); border-color: var(--accent); }
+.pickbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0 12px 8px; padding: 7px 10px; border-radius: 10px; background: var(--accent-soft); font-size: 13px; }
+.pickbar[hidden] { display: none; }
+.pickbar button { padding: 3px 10px; }
 .item .t { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item .m { font-size: 12px; color: var(--muted); display: flex; gap: 6px; flex-wrap: wrap; margin-top: 3px; align-items: center; }
 .hit { font-size: 12px; color: var(--muted); margin-top: 3px; line-height: 1.5; }
@@ -119,6 +124,9 @@ audio { width: 100%; height: 36px; }
 .ts:hover { color: var(--accent); }
 .who { font-weight: 600; margin-right: 4px; }
 .fix { background: var(--ok-soft); border-radius: 3px; padding: 0 2px; cursor: help; }
+.partsep { display: flex; align-items: center; gap: 10px; margin: 18px 8px 8px; font-size: 12px; color: var(--muted); }
+.partsep::after { content: ""; flex: 1; border-top: 1px dashed var(--line); }
+.partsep span { font-weight: 600; color: var(--text); }
 .pend { background: var(--mark); border-radius: 3px; padding: 0 2px; }
 
 /* 校对 */
@@ -161,6 +169,25 @@ html[lang="en"] .h3 { flex-wrap: wrap; row-gap: 2px; }
 .ask textarea { flex: 1; min-height: 44px; max-height: 160px; resize: vertical; }
 .chat .fresh { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; color: var(--muted); cursor: pointer; }
 
+/* 合成一条 */
+dialog#joindlg { border: 1px solid var(--line); border-radius: 14px; padding: 20px 22px; width: min(560px, calc(100vw - 32px)); background: var(--panel); color: var(--text); box-shadow: var(--shadow); }
+dialog#joindlg::backdrop { background: rgba(0,0,0,.28); }
+#joinform h3 { margin: 0 0 4px; font-size: 17px; }
+#joinform p { margin: 4px 0 10px; font-size: 13px; }
+#joinform p.small { font-size: 12px; }
+.jlist { margin: 0 0 12px; padding: 0; list-style: none; counter-reset: part; max-height: 46vh; overflow-y: auto; }
+.jlist li { counter-increment: part; display: flex; align-items: center; gap: 6px; padding: 7px 0; border-bottom: 1px dashed var(--line); }
+.jlist li::before { content: counter(part); width: 22px; height: 22px; flex: none; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; }
+.jlist .pt { flex: 1; min-width: 0; }
+.jlist .pt div:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jlist .pt div:last-child { font-size: 12px; }
+.jlist .pct { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 34px; text-align: right; }
+.jlist button { padding: 2px 8px; }
+.jname { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.jname input { flex: 1; min-width: 0; }
+.jacts { display: flex; gap: 8px; margin-top: 14px; align-items: center; }
+.jacts .sp { flex: 1; }
+
 /* 拖文件、提示 */
 .overlay { position: fixed; inset: 0; background: color-mix(in srgb, var(--accent) 18%, transparent); display: none; align-items: center; justify-content: center; z-index: 10; pointer-events: none; }
 .overlay.on { display: flex; }
@@ -196,7 +223,8 @@ html[lang="en"] .h3 { flex-wrap: wrap; row-gap: 2px; }
 <main>
   <aside>
     <!-- 带格式的那几句拆成几个 span，各自有 data-en：app.js 只换 textContent，换整段会把 <b> <br> 冲掉 -->
-    <div class="drop"><b data-en="Drag audio files into the window">把音频文件拖进窗口</b><span data-en=" to put them in the inbox for automatic processing">，就放进收件箱自动处理</span><br><span data-en="Transcribe → speakers → Claude proofreading → analysis">转写 → 分人 → Claude 校对 → 分析</span></div>
+    <div class="drop"><b data-en="Drag audio files into the window">把音频文件拖进窗口</b><span data-en=" to put them in the inbox for automatic processing">，就放进收件箱自动处理</span><br><span data-en="Transcribe → speakers → Claude proofreading → analysis">转写 → 分人 → Claude 校对 → 分析</span><br><span class="tip" data-en="One event recorded in parts? Drop them together, or ⌘-click them in the list, to join them into one">一场分几段录的：一起拖进来，或者在列表里 ⌘ 点选，合成一条</span></div>
+    <div class="pickbar" id="pickbar" hidden></div>
     <div class="list" id="list"></div>
     <details class="side-sec" id="phonebox"><summary data-en="Recordings on your phone">手机里的录音</summary><div id="phone" class="muted">…</div></details>
     <div class="side-sec"><div class="muted" style="margin-bottom:4px" data-en="Jobs">正在做的事</div><div class="jobs" id="jobs"><span class="muted" data-en="None">没有</span></div></div>
@@ -206,6 +234,7 @@ html[lang="en"] .h3 { flex-wrap: wrap; row-gap: 2px; }
       <span data-en="Click a timestamp in the transcript to play from there. In Proofreading, press ">看稿子时点时间就从那里放；校对里待确认的，按 </span><kbd>Y</kbd><span data-en=" to accept, "> 采纳、</span><kbd>N</kbd><span data-en=" to reject, "> 不采纳、</span><kbd>J</kbd>/<kbd>K</kbd><span data-en=" to move down/up."> 上下挪。</span></div>
   </section>
 </main>
+<dialog id="joindlg"><form id="joinform"></form></dialog>
 <div class="overlay" id="overlay"><div data-en="Drop to put it in the inbox">松手，放进收件箱</div></div>
 <div class="toasts" id="toasts"></div>
 <script src="/app.js"></script>

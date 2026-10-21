@@ -26,6 +26,8 @@
 #   rex link            用手机录：开 tailscale serve、打二维码，手机扫码就能录，边录边传回来走 rex go
 #   rex link stop|status|new-token
 #   rex export [文件] [docx|srt]   把稿子导出成 Word（写在录音旁边）或给出字幕文件；不给文件就是最近一条
+#   rex join 录音1 录音2 … [--name 名字]   几段合成一条：同一场分几次录的接成一条录音，一起校对、分析。
+#                       原来那几条收进 ~/Recordings/已合并/（--keep 留在原处；--no-go 只合成、先不处理）
 #   rex who [文件] [人数]   按声纹分人：一个麦克风录的多人谈话、2026-10-11 之前的 rex both。
 #                       已经转写过的不重转；不给文件就是最近一条。人数不给就自动判
 #   rex trim 文件 --to 49:30   手动指定只保留到哪里
@@ -1476,7 +1478,8 @@ rename_by_keywords() {
 
   new="${base}_${kw}"
   [ "$new" = "$base" ] && return 0
-  for ext in txt srt; do
+  # 分段.json：几段合成的那条（rex join）记着每段从哪开始，得跟着走，不然和录音脱节
+  for ext in txt srt 分段.json; do
     [ -f "$base.$ext" ] && mv -f "$base.$ext" "$new.$ext"
   done
 
@@ -2707,6 +2710,24 @@ export_cmd() {
   open -R "$out" 2>/dev/null || true
 }
 
+# ------------------------------------------------------------------ 几段合成一条（rex join）
+# 同一场谈话分几次录的、手机录了几段的：接成一条录音，再一起校对、分析。怎么接、已经转写过的稿子怎么接上、
+# 原来那几条去哪（~/Recordings/已合并/），见 tools/rex_join.py 的文件头
+join_cmd() {
+  [ "$#" -ge 2 ] || dieL "要两段以上：rex join 录音1 录音2 …（音频文件，或者录音文件夹里录音的名字），按给的顺序接" "At least two are needed: rex join recording1 recording2 … (audio files, or names of recordings in the recordings folder), joined in that order"
+  jargs=( "$@" )
+  [ -n "${JOIN_NAME:-}" ] && jargs+=( --name "$JOIN_NAME" )
+  [ -n "${JOIN_KEEP:-}" ] && jargs+=( --keep )
+  jout=$(REX_DIR="$REX_DIR" python3 "$TOOLS_DIR/rex_join.py" "${jargs[@]}") || exit 1
+  merged=$(printf '%s\n' "$jout" | sed -n 's/^JOINED //p' | tail -1)
+  [ -n "$merged" ] && [ -f "$merged" ] || dieL "合成没成功（原因在上面）" "Joining failed (the reason is above)"
+  if [ -n "${JOIN_NOGO:-}" ]; then
+    sayL "接着处理：${C_G}rex go \"${merged}\"${C_0}" "To process it: ${C_G}rex go \"${merged}\"${C_0}"
+    return 0
+  fi
+  go_cmd "$merged"
+}
+
 # ------------------------------------------------------------------ 用手机录（rex link）
 # 手机浏览器只在 https 下给麦克风，所以经 tailscale serve：只在你自己的 tailnet 里能访问、带正式证书。
 # 服务本身（rex_link.py）只听 127.0.0.1，能做的只有收录音、收文件、看最近的稿子、下载稿子，见它的文件头。
@@ -2871,6 +2892,8 @@ rex: one command to start recording, one to stop. Microphone, system audio, or b
   rex link            Record from your phone: starts tailscale serve and prints a QR code; scan it, record, and the audio streams back here and goes through rex go
   rex link stop|status|new-token
   rex export [file] [docx|srt]   Export the transcript as Word (written next to the recording) or give the subtitle file; no file = the latest one
+  rex join rec1 rec2 … [--name name]   Join several recordings of one event into one recording, proofread and analyzed together.
+                      The originals move to ~/Recordings/已合并/ (--keep leaves them; --no-go only joins, without processing)
   rex who [file] [count]   Speaker diarization by voiceprint: multi-person conversations recorded on one microphone, rex both recordings made before 2026-10-11.
                       Anything already transcribed isn't transcribed again; no file = the latest one. No count = detect it automatically
   rex trim file --to 49:30   Set manually how far to keep
@@ -2934,6 +2957,9 @@ while [ $# -gt 0 ]; do
     --to)     shift; TRIM_TO="${1:-}" ;;
     --dry-run) DRY=1 ;;
     --names)  shift; NAMES="${1:-}" ;;
+    --name)   shift; JOIN_NAME="${1:-}" ;;
+    --keep)   JOIN_KEEP=1 ;;
+    --no-go)  JOIN_NOGO=1 ;;
     --who)    WHO=auto; case "${2:-}" in ''|*[!0-9]*) ;; *) WHO="$2"; shift ;; esac ;;
     --inbox)  GO_INBOX=1 ;;
     -*)       dieL "不认识的参数：$1" "Unknown option: $1" ;;
@@ -2975,6 +3001,7 @@ case "$CMD" in
   app)              app_cmd ${POS[@]+"${POS[@]}"} ;;
   link|mobile)      link_cmd ${POS[@]+"${POS[@]}"} ;;
   export|x)         export_cmd ${POS[@]+"${POS[@]}"} ;;
+  join|merge)       join_cmd ${POS[@]+"${POS[@]}"} ;;
   status|st)        status ;;
   ls|list)          list ;;
   find|f|search)    find_cmd ${POS[@]+"${POS[@]}"} ;;

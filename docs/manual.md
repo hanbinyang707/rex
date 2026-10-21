@@ -32,6 +32,7 @@ The code is in `tools/rex.sh`. When you install it, symlink it to `~/.local/bin/
 | `rex link` | **Record from your phone**: prints a QR code; open it in the phone's browser and record, and the audio streams back and goes through `rex go` (see section 6) |
 | `rex link stop` / `rex link status` / `rex link new-token` | Shut it down / show status and address / make a new token (old QR codes stop working) |
 | `rex export [文件] [docx\|srt]` | Export a transcript as Word, or get its subtitle file; with no file, the latest one (see "Export" in section 5) |
+| `rex join 录音1 录音2 … [--name 名字]` (录音 = recording, 名字 = name) | **Join several recordings into one**: an event recorded in parts becomes one recording, transcribed, proofread and analyzed together (see "Joining recordings" in section 5) |
 | `rex phone` | Lists iPhone Voice Memos (synced over via iCloud) |
 | `rex phone 1` | Takes item 1, copies it into `~/Recordings/` and transcribes it |
 | `rex in` | Lists transcribable audio and video files in `~/Downloads` / `~/Desktop` (where AirDrop puts files) |
@@ -46,7 +47,7 @@ The code is in `tools/rex.sh`. When you install it, symlink it to `~/.local/bin/
 | `rex devices` | Which microphones and output devices there are, and which ones are currently the defaults |
 | `rex help` | Help |
 | `rex mic` | Explicitly records only the microphone (plain `rex` with no arguments is its on/off toggle; you can also put options directly after it: `rex --device "AirPods Pro"`, `rex --wav`) |
-| Aliases | `rex s`=stop, `rex t`=text, `rex st`=status, `rex f`=find, `rex dev`=devices, `rex all`=both, `rex system`=sys, `rex iphone`=phone, `rex drop`=in, `rex dl`=url, `rex cut`=trim, `rex speakers`=who, `rex mobile`=link, `rex x`=export |
+| Aliases | `rex s`=stop, `rex t`=text, `rex st`=status, `rex f`=find, `rex dev`=devices, `rex all`=both, `rex system`=sys, `rex iphone`=phone, `rex drop`=in, `rex dl`=url, `rex cut`=trim, `rex speakers`=who, `rex mobile`=link, `rex x`=export, `rex merge`=join |
 
 Options:
 
@@ -62,6 +63,9 @@ Options:
 | `--who [人数]` | `text` / `phone` / `in` / `url` (`go` includes it by default) | After transcription, also runs voiceprint speaker diarization (same as `rex who`) |
 | `--to 49:30` | `trim` | Keeps only up to this time (also accepts `1:02:03` and plain seconds) |
 | `--dry-run` | `trim` | Only reports how much would be cut; doesn't touch the file |
+| `--name 名字` (名字 = name) | `join` | What to call the joined recording. Without it, the first part's name is kept |
+| `--keep` | `join` | Leaves the original recordings where they are (by default they move to `~/Recordings/已合并/`, "joined") |
+| `--no-go` | `join` | Only joins; doesn't transcribe, proofread or analyze yet |
 
 ---
 
@@ -212,7 +216,7 @@ Everything goes into `~/Recordings/`. Files are named `日期_时间_模式` (da
 2026-08-16_143052_both-mic.m4a  +  ..._both-sys.m4a     (--split)
 ```
 
-Transcription results go right next to the recording, as a `.txt` and an `.srt` (with timestamps) of the same name. `rex both` recordings get a dialogue transcript, with each turn labeled with who is speaking.
+Transcription results go right next to the recording, as a `.txt` and an `.srt` (with timestamps) of the same name. `rex both` recordings get a dialogue transcript, with each turn labeled with who is speaking. A recording joined from several parts also has a `.分段.json` ("parts") recording where each part starts; the parts as they were before joining are in `已合并/` ("joined").
 
 Size (per hour):
 
@@ -401,7 +405,8 @@ rex app
 It opens a web page that runs only on your machine (`http://127.0.0.1:8790`). In Safari, choose "File → Add to Dock"; from then on, opening it from the Dock works just like an app.
 
 - **Recording**: three buttons at the top—**"我 + 对方"** (Me + Other side; for calls and meetings: your microphone + computer audio, each side saved on its own track), "只录电脑声音" (Computer audio only; for online classes and videos, **does not record your microphone**), and "只录我" (Only me; for face-to-face conversations). For phone calls and meetings, always use "我 + 对方". While recording, the top bar shows the duration, a live level bar for each track, and "停止" (Stop): if your microphone has no signal, or capture on any track stops, it turns red right away; if the computer isn't playing any sound at the moment, it shows a gray "没声音" (No sound). Starting a recording takes a few seconds, and clicking repeatedly during that time won't start a second one
-- **Adding files**: dragging an audio file into the window is the same as putting it in the inbox: automatic transcription → diarization → proofreading → analysis
+- **Adding files**: dragging an audio file into the window is the same as putting it in the inbox: automatic transcription → diarization → proofreading → analysis. Drop several at once and it asks whether to "合成一条" (Join into one) or "分开处理" (Process separately)
+- **Joining recordings**: **⌘-click** several in the list on the left, then click "合成一条…" (Join into one…) above it: put them in order, give it a name, and they're joined and processed as one (see "Joining recordings" below)
 - **Recordings on your phone**: import Voice Memos with `rex phone` in a terminal (reading them needs Full Disk Access, which belongs to the terminal app; the background Recording Desk doesn't have it). Once imported, they show up here and are processed as usual
 - **Viewing a recording**: the transcript is color-coded by speaker, and clicking a timestamp plays from that point; automatically corrected words have a green background (hover to see the original), and those awaiting confirmation have a yellow background
 - **Confirming proofreading item by item**: on the "校对" (Proofreading) page, every item Claude is uncertain about offers "采纳 / 不采纳" (Accept / Reject); on the keyboard, `Y` accepts, `N` rejects, `J` / `K` move to the next / previous item, and Space plays that sentence; changes can be reverted with "撤销" (Undo). The edits are made to the transcript file itself, and the report updates to match. To take all the remaining suggestions at once, click "全部采纳" (Accept all) next to the "To confirm" heading; anything whose original text is gone or appears more than once in its line is skipped and left for you
@@ -427,6 +432,26 @@ rex export <file> srt      # subtitles: the <name>.srt written and proofread dur
 
 The Word file has a title (the keyword from the file name), the recording time, then one line per turn: `[time] speaker: words`.
 The Recording Desk's detail view and each transcript on the phone page have "Word" and "Subtitles" buttons that download directly.
+
+### Joining recordings: `rex join`
+
+One conversation recorded in several parts (the call dropped and you redialed, the phone recorded several clips, a morning and an afternoon session), and you want **one transcript and one analysis**:
+
+```bash
+rex join rec1 rec2 rec3                # joined end to end in this order, then through rex go as usual
+rex join a.m4a b.m4a --name weekly     # give it a name; without one, the first part's name is kept
+rex join … --keep                      # leave the originals where they are
+rex join … --no-go                     # only join; process later
+```
+
+The arguments are audio files, or names of recordings in the recordings folder (as `rex ls` shows them, without the extension). The Recording Desk can do it too: **⌘-click** several in the list and click "合成一条…" (Join into one…), or **drop several files into the window together** and choose "合成一条" (Join into one). The dialog already sorts them by when they were recorded; you can move them up and down and change the name.
+
+- **How they're joined**: the audio is joined end to end into one m4a. If every part was recorded with `rex both` (separate tracks), all three streams are joined, so the dialogue transcript is still split into "Me / Other" by track
+- **Nothing is transcribed twice**: if every part already has a transcript, the transcripts are joined in time order (each later part's timestamps shift by the total length of the parts before it), and so is the proofreading: what you accepted, what you rejected and what is still waiting for you all carry over; parts that were never proofread are marked as not proofread, and `rex go` proofreads only those. If any part hasn't been transcribed yet, the whole recording is transcribed again, so speakers are identified across all parts together
+- **The analysis knows it's stitched together**: Claude is told how many parts there are, where each one starts and when it was recorded, and that there may be gaps between them. In the Recording Desk, each part starts with a divider in the transcript, and the list shows "N parts" on the recording
+- **The name**: it starts with the time the first part was recorded. If all parts come from the same source (all microphone, all calls), that source is kept; otherwise it's named like an import. If the first part has no name yet (never transcribed), naming waits: it's named by keywords once transcribed
+- **Nothing is deleted**: the originals move to `~/Recordings/已合并/<new name>/` (files dropped in to be joined end up there too). To undo: move the joined recording to the Trash, then move the files in that folder back to `~/Recordings/`
+- Recordings that are being recorded or processed can't be joined, and neither can old `--split` recordings (two files)
 
 ### End to end: `rex go` and the inbox
 
@@ -1005,6 +1030,7 @@ After installing BlackHole, you need to **reboot once**. `switchaudio-osx` isn't
 | `tools/rex_app.py`, `tools/rex_app/` | The Recording Desk (`rex app`): the local web server and pages. Listens only on 127.0.0.1 |
 | `tools/rex_link.py`, `tools/rex_link/` | Phone recording (`rex link`): a service and phone page that only receive recordings and files and offer transcripts for download. Listens only on 127.0.0.1; reached through tailscale serve |
 | `tools/rex_export.py` | `rex export`: Word (a .docx assembled with the standard library) and subtitles |
+| `tools/rex_join.py` | `rex join`: joins several recordings into one (audio, transcripts and proofreading records together) |
 | `~/.config/rex/link-token` | The `rex link` token (mode 600); replaced by `rex link new-token` |
 | `~/.local/share/rex-runtime/` | Copies of the scripts for the inbox background job (background jobs can't read "Documents"), **synced automatically** |
 | `~/.cache/sherpa-onnx/` | Program and models for voiceprint speaker diarization (about 93 MB), **not in the repository** |

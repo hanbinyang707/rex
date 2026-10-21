@@ -28,6 +28,7 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const S = {
   list: [], sel: null, rex: null, tab: 'text', focus: 0, results: null, recording: { on: false },
   sig: '', lastScroll: 0, colors: {}, phoneLoaded: false,
+  picked: new Set(), join: null, joinWatch: null,   // ⌘ 点选的几条；「合成一条」对话框；等着合成好的那条
 };
 
 // ---------------------------------------------------------------- 工具
@@ -64,6 +65,8 @@ function fmt(sec) {
   const p = n => String(n).padStart(2, '0');
   return h ? `${h}:${p(m)}:${p(s)}` : `${p(m)}:${p(s)}`;
 }
+
+const mb = n => (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + ' MB';
 
 function dur(sec) {
   if (!sec) return '';
@@ -171,6 +174,7 @@ function md(src) {
 function chips(r) {
   const c = [];
   if (r.busy) c.push(`<span class="chip busy"><span class="spin"></span> ${T('处理中', 'Processing')}</span>`);
+  if (r.parts > 1) c.push(`<span class="chip" title="${T(`由 ${r.parts} 段录音合成`, `Joined from ${r.parts} recordings`)}">${T(`${r.parts} 段`, `${r.parts} parts`)}</span>`);
   if (!r.transcribed) c.push(`<span class="chip">${T('没转写', 'Not transcribed')}</span>`);
   else if (r.dialogue) c.push(`<span class="chip ok">${r.speakers.length > 1 ? r.speakers.length + T(' 人', ' speakers') : T('对话稿', 'Transcript')}</span>`);
   if (r.proof) {
@@ -201,11 +205,28 @@ function renderList() {
     if (g !== last) { html += `<div class="group">${esc(g)}</div>`; last = g; }
     // source 是服务端按界面语言给的标签（rex_app.py 的 L('导入', 'Imported')），这里比较用同一对
     const meta = [r.when.slice(11), r.source + (r.origin && r.source === T('导入', 'Imported') ? '' : ''), dur(r.duration)].filter(Boolean).join(' · ');
-    html += `<div class="item ${r.key === S.sel ? 'sel' : ''}" data-key="${esc(r.key)}" title="${T('双击移到废纸篓', 'Double-click to move to the Trash')}">
+    html += `<div class="item ${r.key === S.sel ? 'sel' : ''} ${S.picked.has(r.key) ? 'picked' : ''}" data-key="${esc(r.key)}" title="${T('双击移到废纸篓 · ⌘ 点选几条可以合成一条', 'Double-click to move to the Trash · ⌘-click several to join them into one')}">
       <div class="t">${esc(r.title)}</div>
       <div class="m">${esc(meta)} ${chips(r)}</div></div>`;
   }
   el.innerHTML = html;
+}
+
+// ⌘ 点选了几条：列表上面一条横栏，「合成一条…」打开对话框
+function renderPickbar() {
+  const el = $('#pickbar'), n = S.picked.size;
+  el.hidden = !n;
+  if (!n) return;
+  el.innerHTML = `<span>${T(`已选 ${n} 条`, `${n} selected`)}</span>
+    <button class="primary" data-act="join" ${n < 2 ? 'disabled' : ''}>${T('合成一条…', 'Join into one…')}</button>
+    <button class="ghost" data-act="unpick">${T('取消', 'Cancel')}</button>
+    ${n < 2 ? `<span class="muted">${T('再 ⌘ 点一条', '⌘-click one more')}</span>` : ''}`;
+}
+
+function togglePick(k) {
+  if (!S.picked.size && S.sel && S.sel !== k) S.picked.add(S.sel);    // 和访达一样：⌘ 点是「再加一条」，开着的那条也算
+  if (S.picked.has(k)) S.picked.delete(k); else S.picked.add(k);
+  renderList(); renderPickbar();
 }
 
 function renderJobs(jobs, inbox) {
@@ -284,6 +305,7 @@ function renderDetail() {
   else if (!p || !r.analysis) action = `<button class="primary" data-act="go">${!p ? T('补做校对和分析', 'Run proofreading and analysis') : T('补做分析', 'Run analysis')}</button>`;
   const speakersN = new Set(r.entries.map(e => e.who).filter(Boolean)).size;
   const meta = [r.when, r.source + (r.origin && r.origin !== r.title ? T('：', ': ') + r.origin : ''),
+    r.parts.length ? T(`由 ${r.parts.length} 段合成`, `joined from ${r.parts.length} recordings`) : '',
     speakersN > 1 ? speakersN + T(' 人', ' speakers') : '', r.kw && r.kw !== r.title ? T('关键词：', 'Keywords: ') + r.kw : ''].filter(Boolean).join(' · ');
   const tabs = `
         <button class="tab ${S.tab === 'text' ? 'on' : ''}" data-tab="text">${T('稿子', 'Transcript')}</button>
@@ -305,7 +327,7 @@ function renderDetail() {
     <div class="dhead">
       <div class="dtitle"><h2>${esc(r.title)}</h2><span id="dact">${action}</span><button class="ghost" data-act="reveal" title="${T('在访达中显示', 'Show in Finder')}">${T('访达', 'Finder')}</button><button class="ghost" data-act="export-docx" title="${T('把稿子下载成 Word', 'Download the transcript as Word')}">Word</button><button class="ghost" data-act="export-srt" title="${T('下载字幕（.srt，带名字、校对过）', 'Download subtitles (.srt, with names, proofread)')}">${T('字幕', 'Subtitles')}</button><button class="ghost" data-act="trash" title="${T('移到废纸篓（双击左边列表里的这一条也行）', 'Move to the Trash (or double-click it in the list on the left)')}">${T('删除', 'Delete')}</button></div>
       <div class="dmeta">${esc(meta)}</div>
-      ${r.audio.length ? `<audio id="player" controls preload="metadata" data-key="${esc(r.key)}" data-i="0" src="/media?k=${encodeURIComponent(r.key)}&i=0"></audio>
+      ${r.audio.length ? `<audio id="player" controls preload="metadata" data-key="${esc(r.key)}" data-i="0" src="/media?k=${encodeURIComponent(r.key)}&i=0${r.parts.length ? '&p=' + r.parts.length : ''}"></audio>
         ${r.audio.length > 1 ? `<div class="tracks">${T('分轨录音：', 'Separate tracks: ')}${r.audio.map((a, i) => `<button class="ghost" data-track="${i}">${/-sys/.test(a) ? T('电脑声音那轨', 'Computer audio track') : T('麦克风那轨', 'Microphone track')}</button>`).join('')}</div>` : ''}` : `<div class="muted">${T('没有音频文件', 'No audio file')}</div>`}
       <div class="tabs" id="tabs">${tabs}</div>
     </div>
@@ -331,13 +353,24 @@ function paneText(r) {
     for (const x of r.proof.applied) (fixes[x.id] = fixes[x.id] || []).push(x);
     for (const x of r.proof.unsure) (pend[x.id] = pend[x.id] || []).push(x);
   }
+  const parts = r.parts;
+  let pi = 0;
   return r.entries.map(e => {
+    let sep = '';
+    while (pi < parts.length && e.a >= parts[pi].start - 0.5) sep += partSep(parts[pi], pi++);
     // by 是存在 .校对.json 里的固定值（claude / 你 / 你撤销），不翻译，照原样比
     const marks = (fixes[e.id] || []).map(x => ({ s: x.new, cls: 'fix', title: T(`原来是「${x.old}」${x.by === '你' ? '（你采纳的）' : ''}`, `Originally “${x.old}”${x.by === '你' ? ' (accepted by you)' : ''}`) }))
       .concat((pend[e.id] || []).map(x => ({ s: x.old, cls: 'pend', title: T(`可能是「${x.new}」：${x.why}`, `Maybe “${x.new}”: ${x.why}`) })));
-    return `<div class="line" id="L${e.id}" data-a="${e.a}"><span class="ts" data-t="${e.a}">${fmt(e.a)}</span>
+    return sep + `<div class="line" id="L${e.id}" data-a="${e.a}"><span class="ts" data-t="${e.a}">${fmt(e.a)}</span>
       <div>${e.who ? `<span class="who" style="color:${color(e.who)}">${esc(e.who)}</span>` : ''}${marked(e.text, marks)}</div></div>`;
   }).join('');
+}
+
+// 几段合成的稿子：每段开头一条分隔，写着是第几段、什么时候录的、原来叫什么
+function partSep(p, i) {
+  const was = (p.name || '').replace(/\.[^.]+$/, '');
+  return `<div class="partsep"><span>${T(`第 ${i + 1} 段`, `Part ${i + 1}`)}</span>${esc([p.recorded, dur(Math.round(p.duration || 0)),
+    was ? T(`原来叫「${was}」`, `was “${was}”`) : ''].filter(Boolean).join(' · '))}</div>`;
 }
 
 function lineText(r, id) {
@@ -483,6 +516,9 @@ async function refresh() {
   }
   S.fails = 0;
   S.list = j.recordings;
+  const nPicked = S.picked.size;
+  for (const k of [...S.picked]) if (!S.list.some(r => r.key === k)) S.picked.delete(k);
+  if (S.picked.size !== nPicked) renderPickbar();     // 没变就别重画：正要点「合成一条…」时按钮被换掉，这一下就丢了
   renderRecording(j.recording);
   renderJobs(j.jobs, j.inbox);
   if (!S.results) renderList();
@@ -490,9 +526,11 @@ async function refresh() {
     const w = S.want; S.want = null;
     if (!S.sel && S.list.some(r => r.key === w.key)) { S.pendingTab = w.tab; select(w.key); }
   }
-  // 转写完会按关键词改名（X → X_关键词）。选中的那条从列表里消失了，就跟到新名字上
+  if (S.joinWatch) followJoin(j.jobs);
+  // 转写完会按关键词改名（X → X_关键词）；合成一条之后，原来那几条收进了「已合并」。
+  // 选中的那条从列表里消失了，就跟到新名字上、合成的那条上
   if (S.sel && !S.list.some(r => r.key === S.sel)) {
-    const moved = S.list.find(r => r.key.startsWith(S.sel + '_'));
+    const moved = S.list.find(r => r.key.startsWith(S.sel + '_')) || S.list.find(r => r.joined_from.includes(S.sel));
     if (moved) { S.sel = moved.key; $('#detail').dataset.key = ''; if (!S.results) renderList(); loadDetail(S.sel, true); return; }
   }
   if (S.sel && S.rex) {
@@ -505,9 +543,9 @@ async function refresh() {
 function stale(cur, rex) {
   const p = rex.proof;
   const shown = [rex.busy, rex.entries.length > 0, !!rex.analysis, rex.chat.length,
-    p ? p.applied.length : -1, p ? p.unsure.length : -1];
+    p ? p.applied.length : -1, p ? p.unsure.length : -1, rex.parts.length];
   const now = [cur.busy, cur.transcribed, cur.analyzed, cur.chats,
-    cur.proof ? cur.proof.applied : -1, cur.proof ? cur.proof.unsure : -1];
+    cur.proof ? cur.proof.applied : -1, cur.proof ? cur.proof.unsure : -1, cur.parts];
   return JSON.stringify(shown) !== JSON.stringify(now);
 }
 
@@ -516,6 +554,7 @@ async function loadDetail(key, keepTab) {
   if (!j.ok) { toast(j.msg || T('打不开这条', "Couldn't open this recording"), 'bad'); return; }
   if (S.sel !== key) return;
   if (!keepTab) { S.tab = S.pendingTab || 'text'; S.pendingTab = null; S.focus = 0; }
+  if (S.rex && S.rex.key === key && S.rex.parts.length !== j.rex.parts.length) $('#detail').dataset.key = '';  // 换成了合成的那条：整个重画
   S.rex = j.rex;
   renderDetail();
   syncHash();
@@ -622,6 +661,167 @@ async function sendChat() {
   const box = $('#detail'); box.scrollTop = box.scrollHeight;
 }
 
+// ---------------------------------------------------------------- 合成一条（rex join）
+
+// 列表里 ⌘ 点选的几条，或者一次拖进来的几个文件：按时间排好、可以上下挪，接成一条再一起处理。
+// 怎么接、已经转写过的稿子怎么接上，见 rex_join.py；这里只管排顺序、起名字、传文件
+function joinPicked() {
+  const items = [...S.picked].map(k => S.list.find(r => r.key === k)).filter(Boolean).map(r => ({
+    key: r.key, title: r.title, when: r.when, duration: r.duration,
+    named: !!((r.origin && r.origin !== 'drop') || r.kw),      // 有名字（导入时的原名、关键词），不只是「麦克风」这种来源
+  }));
+  if (items.length >= 2) openJoin(items, false);
+}
+
+function joinFiles(files) {
+  const day = t => { const d = new Date(t), p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+  openJoin(files.map(f => ({ file: f, title: f.name, when: day(f.lastModified || Date.now()), t: f.lastModified || 0, size: f.size, named: true })), true);
+}
+
+function openJoin(items, upload) {
+  // 按开录时间排；同一分钟的按名字（「新录音 9」排在「新录音 10」前面）
+  items.sort((a, b) => (a.t || 0) - (b.t || 0) || a.when.localeCompare(b.when) || (a.key || a.title).localeCompare(b.key || b.title, undefined, { numeric: true }));
+  S.join = { items, upload, name: '', edited: false, busy: false, xhr: null };
+  S.join.name = joinDefaultName();
+  renderJoin();
+  $('#joindlg').showModal();
+  if (upload) probeDurations(S.join);
+}
+
+function joinDefaultName() {
+  const x = S.join.items[0];
+  return x && x.named ? x.title.replace(/\.[^.]+$/, '') : '';
+}
+
+function joinMeta(x) {
+  return [x.when, dur(Math.round(x.duration || 0)), x.size ? mb(x.size) : ''].filter(Boolean).join(' · ');
+}
+
+function renderJoin() {
+  const J = S.join, n = J.items.length, lock = J.busy ? 'disabled' : '';
+  $('#joinform').innerHTML = `
+    <h3>${J.upload ? T(`拖进来 ${n} 个文件`, `${n} files dropped`) : T(`把 ${n} 条合成一条`, `Join ${n} recordings into one`)}</h3>
+    <p class="muted">${T('按下面的顺序首尾接成一条，再一起转写、校对、分析：一份稿子、一份分析。', 'They are joined end to end in this order, then transcribed, proofread and analyzed together: one transcript, one analysis.')}</p>
+    <ol class="jlist">${J.items.map((x, i) => `<li>
+      <div class="pt"><div>${esc(x.title)}</div><div class="muted" id="jm${i}">${esc(joinMeta(x))}</div></div>
+      <span class="pct" id="jp${i}"></span>
+      <button type="button" class="ghost" data-mv="${i}" data-d="-1" ${i && !J.busy ? '' : 'disabled'} title="${T('往前挪', 'Move up')}">↑</button>
+      <button type="button" class="ghost" data-mv="${i}" data-d="1" ${i < n - 1 && !J.busy ? '' : 'disabled'} title="${T('往后挪', 'Move down')}">↓</button></li>`).join('')}</ol>
+    <label class="jname"><span>${T('名字', 'Name')}</span><input id="jname" maxlength="60" value="${esc(J.name)}" ${lock}
+      placeholder="${T('可以不填：转写完按关键词起', 'Optional: named after its keywords once transcribed')}"></label>
+    <p class="muted small">${J.upload ? T('这几个文件合成以后收进 ~/Recordings/已合并/。', 'After joining, these files are kept in ~/Recordings/已合并/.')
+      : T('原来那几条收进 ~/Recordings/已合并/，不删。已经转写、校对过的接着用，不重新转写。', 'The originals are moved to ~/Recordings/已合并/ (nothing is deleted). Transcripts and proofreading already done are reused, not redone.')}</p>
+    <div class="jacts">
+      ${J.upload ? `<button type="button" data-act="join-apart" ${lock} title="${T('一个一个放进收件箱，各自处理', 'Put them in the inbox one by one, each processed on its own')}">${T('分开处理', 'Process separately')}</button>` : ''}
+      <span class="sp"></span>
+      <button type="button" class="ghost" data-act="join-cancel">${T('取消', 'Cancel')}</button>
+      <button type="submit" class="primary" id="jgo" ${lock}>${J.busy ? `<span class="spin"></span> ${J.upload ? T('上传中…', 'Uploading…') : T('排队中…', 'Queuing…')}` : T('合成一条', 'Join into one')}</button>
+    </div>`;
+}
+
+function moveJoin(i, d) {
+  const J = S.join, it = J.items, j = i + d;
+  if (!J || J.busy || j < 0 || j >= it.length) return;
+  [it[i], it[j]] = [it[j], it[i]];
+  if (!J.edited) J.name = joinDefaultName();          // 名字没改过就跟着第一段走
+  renderJoin();
+  const b = $(`#joinform [data-mv="${j}"][data-d="${d}"]`);
+  (b && !b.disabled ? b : $('#jgo')).focus();
+}
+
+// 拖进来的文件在浏览器里先读出时长，列表里好核对是不是那几段
+function probeDurations(J) {
+  for (const x of J.items) {
+    const url = URL.createObjectURL(x.file), a = new Audio();
+    a.preload = 'metadata';
+    a.onloadedmetadata = () => {
+      URL.revokeObjectURL(url);
+      if (S.join !== J || !isFinite(a.duration)) return;
+      x.duration = a.duration;
+      const el = $('#jm' + J.items.indexOf(x));
+      if (el) el.textContent = joinMeta(x);
+    };
+    a.onerror = () => URL.revokeObjectURL(url);
+    a.src = url;
+  }
+}
+
+function closeJoin() {
+  const J = S.join;
+  S.join = null;
+  if (J && J.xhr) J.xhr.abort();                      // 传到一半取消：runJoin 那边收到 aborted，把这一组收掉
+  if ($('#joindlg').open) $('#joindlg').close();
+}
+
+// 传一个文件到暂存区的这一组（不进收件箱），等这一组都传完再合成
+function putFile(J, file, group, onpct) {
+  return new Promise(resolve => {
+    const x = new XMLHttpRequest();
+    J.xhr = x;
+    x.open('POST', `/api/upload?group=${group}&name=${encodeURIComponent(file.name)}`);
+    x.setRequestHeader('X-Rex-App', '1');
+    x.setRequestHeader('X-Rex-Mtime', String((file.lastModified || 0) / 1000));   // 合成时按它定开录时刻
+    x.upload.onprogress = e => { if (e.lengthComputable) onpct(Math.round(e.loaded / e.total * 100)); };
+    const done = r => { J.xhr = null; resolve(r); };
+    x.onload = () => { let j = {}; try { j = JSON.parse(x.responseText); } catch (e) { /* 下面统一报 */ } done(j.ok ? j : { ok: false, msg: j.msg }); };
+    x.onerror = () => done({ ok: false, msg: T('没传上：连不上服务', "Upload failed: can't reach the server") });
+    x.onabort = () => done({ ok: false, aborted: true });
+    x.send(file);
+  });
+}
+
+async function runJoin() {
+  const J = S.join;
+  if (!J || J.busy) return;
+  J.name = $('#jname').value.trim();
+  J.busy = true;
+  renderJoin();
+  let j, ids;
+  if (J.upload) {
+    const group = [...crypto.getRandomValues(new Uint8Array(8))].map(b => b.toString(16).padStart(2, '0')).join('');
+    ids = [];
+    for (let i = 0; i < J.items.length; i++) {
+      const r = await putFile(J, J.items[i].file, group, pct => { const el = $('#jp' + i); if (el) el.textContent = pct + '%'; });
+      if (!r.ok) {
+        api('/api/join/cancel', { group });           // 已经传上来的那几个移到废纸篓
+        if (!r.aborted) toast(r.msg || T('没传上', 'Upload failed'), 'bad', 8000);
+        J.busy = false;
+        if (S.join === J) renderJoin();
+        return;
+      }
+      ids.push(r.name);                                // 重名的会被改成「名字-2」：以服务端回的为准
+      const el = $('#jp' + i); if (el) el.textContent = '✓';
+    }
+    j = await api('/api/join', { group, files: ids, name: J.name });
+    if (!j.ok) api('/api/join/cancel', { group });
+  } else {
+    ids = J.items.map(x => x.key);
+    j = await api('/api/join', { keys: ids, name: J.name });
+  }
+  J.busy = false;
+  if (!j.ok) { toast(j.msg, 'bad', 8000); if (S.join === J) renderJoin(); return; }
+  toast(j.msg, 'ok', 8000);
+  S.joinWatch = { ids, job: j.job, sel: S.sel };
+  S.picked.clear(); renderPickbar(); renderList();
+  closeJoin();
+  refresh();
+}
+
+// 合成好了就打开它（这期间你没去看别的那条的话）；没合成成就说一声
+function followJoin(jobs) {
+  const w = S.joinWatch;
+  const hit = S.list.find(r => r.parts && w.ids.every(x => r.joined_from.includes(x)));
+  const job = jobs.find(x => x.id === w.job);
+  if (hit) {
+    S.joinWatch = null;
+    if (!S.sel || S.sel === w.sel || w.ids.includes(S.sel) || !S.list.some(r => r.key === S.sel)) select(hit.key);
+    else toast(T(`合成好了：${hit.title}`, `Joined: ${hit.title}`), 'ok', 8000);
+  } else if (!job || job.state === '出错' || job.state === '完成') {
+    S.joinWatch = null;
+    if (job && job.state === '出错') toast(T('合成没成功，原因在左下「正在做的事」里', "Joining failed; the reason is under “Jobs” at the bottom left"), 'bad', 10000);
+  }
+}
+
 // ---------------------------------------------------------------- 上传、录音、手机、登录
 
 function upload(file) {
@@ -701,6 +901,8 @@ document.addEventListener('click', e => {
     // 双击 = 移到废纸篓。不用浏览器的 dblclick：第一下点击会重画列表，第二下落在新元素上，浏览器认不出是双击；
     // 这里按「同一条、450 毫秒内点两下」自己判
     const k = item.dataset.key, now = Date.now();
+    // ⌘ 点：挑几条合成一条。不算进双击（连着 ⌘ 点两下不能是「删除」），也不换右边
+    if ((e.metaKey || e.ctrlKey) && !S.results) { S.lastClick = null; togglePick(k); return; }
     if (S.lastClick && S.lastClick.key === k && now - S.lastClick.t < 450) { S.lastClick = null; trashRec(k); return; }
     S.lastClick = { key: k, t: now };
     select(k); return;
@@ -711,7 +913,13 @@ document.addEventListener('click', e => {
   if (dec) { decide(dec.dataset.rid, dec.dataset.do); return; }
   const card = e.target.closest('.card');
   if (card) { S.focus = Number(card.dataset.i); document.querySelectorAll('.card').forEach(c => c.classList.toggle('focus', c === card)); }
+  const mv = e.target.closest('[data-mv]');
+  if (mv) { moveJoin(Number(mv.dataset.mv), Number(mv.dataset.d)); return; }
   const act = e.target.closest('[data-act]');
+  if (act && act.dataset.act === 'join') { joinPicked(); return; }
+  if (act && act.dataset.act === 'unpick') { S.picked.clear(); renderPickbar(); renderList(); return; }
+  if (act && act.dataset.act === 'join-cancel') { closeJoin(); return; }
+  if (act && act.dataset.act === 'join-apart') { const files = S.join.items.map(x => x.file); closeJoin(); files.forEach(upload); return; }
   if (act && act.dataset.act === 'go') { api('/api/go', { key: S.sel }).then(j => { toast(j.msg, j.ok ? 'ok' : 'bad'); refresh(); }); return; }
   if (act && act.dataset.act === 'reveal') { api('/api/reveal', { key: S.sel }); return; }
   if (act && (act.dataset.act === 'export-docx' || act.dataset.act === 'export-srt')) { exportRec(act.dataset.act.slice(7)); return; }
@@ -730,6 +938,8 @@ document.addEventListener('click', e => {
 document.addEventListener('keydown', e => {
   const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
   if (e.target.id === 'ask' && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendChat(); return; }
+  if ($('#joindlg').open) return;                    // 对话框挡在前面：Y / N 不能落到后面的校对上
+  if (e.key === 'Escape' && S.picked.size && !typing) { S.picked.clear(); renderPickbar(); renderList(); return; }
   if (typing || e.metaKey || e.ctrlKey || e.altKey || S.tab !== 'proof') return;
   const list = pending();
   if (!list.length) return;
@@ -763,15 +973,28 @@ $('#phonebox').addEventListener('toggle', e => { if (e.target.open && !S.phoneLo
 
 // 拖文件：整个窗口都接。拖进来的要是文字（访达会存成 .textClipping），直接说清楚
 let dragDepth = 0;
-window.addEventListener('dragenter', e => { e.preventDefault(); dragDepth++; $('#overlay').classList.add('on'); });
+window.addEventListener('dragenter', e => {
+  e.preventDefault(); dragDepth++;
+  const n = [...((e.dataTransfer && e.dataTransfer.items) || [])].filter(x => x.kind === 'file').length;
+  $('#overlay div').textContent = n >= 2 ? T('松手：可以合成一条，也可以分开处理', 'Drop: join them into one, or process them separately') : T('松手，放进收件箱', 'Drop to put it in the inbox');
+  $('#overlay').classList.add('on');
+});
 window.addEventListener('dragleave', e => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) $('#overlay').classList.remove('on'); });
 window.addEventListener('dragover', e => e.preventDefault());
 window.addEventListener('drop', e => {
   e.preventDefault(); dragDepth = 0; $('#overlay').classList.remove('on');
   const files = [...(e.dataTransfer.files || [])];
+  if (S.join) { toast(T('先把「合成一条」那个框关掉，再拖', 'Close the “Join” dialog first, then drop again'), 'bad'); return; }
   if (!files.length) { toast(T('拖进来的不是文件（像是一段文字）。在访达里拖那个音频文件的图标', "What you dropped isn't a file (it looks like text). Drag the audio file's icon from Finder"), 'bad', 8000); return; }
-  files.forEach(upload);
+  const audio = files.filter(f => AUDIO_EXT.includes((f.name.split('.').pop() || '').toLowerCase()));
+  files.filter(f => !audio.includes(f)).forEach(upload);    // 不是音视频的：upload 会说一声
+  if (audio.length >= 2) joinFiles(audio);                  // 几个一起拖进来：问一句合成一条还是分开
+  else audio.forEach(upload);
 });
+
+$('#joinform').addEventListener('submit', e => { e.preventDefault(); runJoin(); });
+$('#joinform').addEventListener('input', e => { if (e.target.id === 'jname' && S.join) { S.join.name = e.target.value; S.join.edited = true; } });
+$('#joindlg').addEventListener('close', () => { if (S.join) closeJoin(); });    // Esc 关掉的
 
 setInterval(() => { if (S.recording && S.recording.on) refresh(); }, 1000);   // 录音时电平条一秒刷一次
 setInterval(() => { if (!S.recording || !S.recording.on) refresh(); }, 2500);

@@ -6,6 +6,7 @@
 """
 import http.client
 import http.server
+import io
 import json
 import os
 import shutil
@@ -192,6 +193,111 @@ class ChatStartOver(unittest.TestCase):
         self.assertIn("从分析重新开始", j.get("warn", ""))
         self.reply["result"] = "Read 这本书时要注意：\n{ 不是代码 }"
         self.assertNotIn("warn", rex_app.chat(self.KEY, "再问"))
+
+
+
+class JoinOnTheDesk(unittest.TestCase):
+    """录音台的「合成一条」：一起拖进来的几个文件先放暂存区、不进收件箱；排任务之前把不能合的挡下来；
+    排上之后那几条都算「正在处理」；列表认得出合成的那条。不真跑 rex join（JOBS 换成假的）。"""
+
+    class FakeJobs:
+        def __init__(self):
+            self.added = []
+
+        def add(self, kind, key, label, steps, keys=()):
+            job = {"id": "j%d" % len(self.added), "kind": kind, "key": key, "label": label, "steps": steps,
+                   "keys": list(keys)}
+            self.added.append(job)
+            return job
+
+        def busy(self, key):
+            return key == "2026-10-19_100000_mic"          # 假装这一条正在处理
+
+    def setUp(self):
+        for f in os.listdir(REXDIR):
+            p = os.path.join(REXDIR, f)
+            shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
+        self.real = rex_app.JOBS
+        rex_app.JOBS = self.jobs = self.FakeJobs()
+
+    def tearDown(self):
+        rex_app.JOBS = self.real
+
+    def touch(self, *names):
+        for n in names:
+            with open(os.path.join(REXDIR, n), "w") as fh:
+                fh.write("x")
+
+    def test_staged_uploads_stay_out_of_the_inbox(self):
+        d = rex_app.stage_dir("ab12cd34")
+        a = rex_app.save_upload("新录音.m4a", 3, io.BytesIO(b"abc"), folder=d)
+        b = rex_app.save_upload("新录音.m4a", 3, io.BytesIO(b"def"), folder=d)
+        self.assertEqual([os.path.basename(a), os.path.basename(b)], ["新录音.m4a", "新录音-2.m4a"])
+        self.assertEqual(os.path.dirname(a), os.path.join(REXDIR, ".join", "ab12cd34"))
+        self.assertFalse(os.path.exists(rex_app.INBOX))
+        for bad in ("../x", "AB12CD34", "ab12", "", "ab12cd34/.."):
+            self.assertIsNone(rex_app.stage_dir(bad), bad)
+
+    def test_from_the_list(self):
+        self.touch("2026-10-19_090000_mic.m4a", "2026-10-19_093000_mic.m4a")
+        ok, msg, job = rex_app.queue_join({"keys": ["2026-10-19_090000_mic", "2026-10-19_093000_mic"], "name": " 周会 "})
+        self.assertTrue(ok, msg)
+        self.assertEqual(job["steps"][0][2:], ["join", os.path.join(REXDIR, "2026-10-19_090000_mic.m4a"),
+                                               os.path.join(REXDIR, "2026-10-19_093000_mic.m4a"), "--name", "周会"])
+        self.assertEqual(job["keys"], ["2026-10-19_090000_mic", "2026-10-19_093000_mic"])
+
+    def test_refuses_what_it_should(self):
+        self.touch("2026-10-19_090000_mic.m4a", "2026-10-19_100000_mic.m4a", "2026-10-19_110000_mic.m4a",
+                   "2026-10-19_120000_both-mic.m4a", "2026-10-19_120000_both-sys.m4a")
+        for keys, why in ((["2026-10-19_090000_mic"], "两段以上"),
+                          (["2026-10-19_090000_mic", "2026-10-19_090000_mic"], "两遍"),
+                          (["2026-10-19_090000_mic", "不存在"], "没有音频"),
+                          (["2026-10-19_090000_mic", "../etc"], "没有音频"),
+                          (["2026-10-19_090000_mic", "2026-10-19_100000_mic"], "正在处理"),
+                          (["2026-10-19_090000_mic", "2026-10-19_120000_both"], "分轨")):
+            ok, msg, _ = rex_app.queue_join({"keys": keys})
+            self.assertFalse(ok, keys)
+            self.assertIn(why, msg)
+        with open(os.path.join(REXDIR, ".current"), "w") as fh:
+            fh.write("pid=%d\nmode=mic\nstart=0\nfiles=%s\n" % (os.getpid(), os.path.join(REXDIR, "2026-10-19_110000_mic.m4a")))
+        ok, msg, _ = rex_app.queue_join({"keys": ["2026-10-19_090000_mic", "2026-10-19_110000_mic"]})
+        self.assertFalse(ok)
+        self.assertIn("正在录", msg)
+        self.assertEqual(self.jobs.added, [])
+
+    def test_uploaded_group_in_the_given_order(self):
+        d = rex_app.stage_dir("ab12cd34")
+        os.makedirs(d)
+        for n in ("a.m4a", "b.m4a"):
+            with open(os.path.join(d, n), "w") as fh:
+                fh.write("x")
+        ok, msg, job = rex_app.queue_join({"group": "ab12cd34", "files": ["b.m4a", "a.m4a"]})
+        self.assertTrue(ok, msg)
+        self.assertEqual(job["steps"][0][2:], ["join", os.path.join(d, "b.m4a"), os.path.join(d, "a.m4a")])
+        for files in (["a.m4a", "../x.m4a"], ["a.m4a", "c.m4a"], ["a.m4a"], ["a.m4a", ".upload-1.part"]):
+            self.assertFalse(rex_app.queue_join({"group": "ab12cd34", "files": files})[0], files)
+        self.assertFalse(rex_app.queue_join({"group": "nope", "files": ["a.m4a", "b.m4a"]})[0])
+
+    def test_joined_recording_in_the_list(self):
+        k = "2026-10-19_090000_mic_周会"
+        self.touch(k + ".m4a")
+        with open(os.path.join(REXDIR, k + ".分段.json"), "w", encoding="utf-8") as fh:
+            json.dump({"segments": [{"name": "2026-10-19_090000_mic.m4a", "key": "2026-10-19_090000_mic", "start": 0,
+                                     "duration": 60, "via": ["2026-10-19_090000_mic_上午"]},
+                                    {"name": "新录音 3.m4a", "key": None, "start": 60, "duration": 30}]}, fh)
+        r = [x for x in rex_app.scan() if x["key"] == k][0]
+        self.assertEqual(r["parts"], 2)
+        # 录音台按它跟到这一条上：原来的名字、拖进来的文件名，还有中间合成过的那条
+        self.assertEqual(r["joined_from"], ["2026-10-19_090000_mic", "2026-10-19_090000_mic_上午", "新录音 3.m4a"])
+        self.assertEqual(len(rex_app.detail(k)["parts"]), 2)
+        self.assertIn(os.path.join(REXDIR, k + ".分段.json"), rex_app.recording_files(k))   # 删的时候一起走
+
+    def test_busy_covers_every_part(self):
+        jobs = rex_app.Jobs.__new__(rex_app.Jobs)          # 不起后台线程
+        jobs.items, jobs.lock = [], threading.Lock()
+        jobs.items.append({"key": "", "keys": ["2026-10-19_090000_mic", "2026-10-19_093000_mic"], "state": "排队"})
+        self.assertTrue(jobs.busy("2026-10-19_093000_mic"))
+        self.assertFalse(jobs.busy("2026-10-19_100000_mic"))
 
 
 if __name__ == "__main__":

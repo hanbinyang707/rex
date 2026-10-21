@@ -70,6 +70,7 @@ rex app       # 打开录音台（之后常驻后台、开机自动起）
 | `rex app` | 录音台网页界面 `http://127.0.0.1:8790`，常驻后台、开机自动起：录音、确认校对（逐条 Y/N，或一键全部采纳）、接着问、搜索、双击一条移到废纸篓 |
 | `rex link` | **用手机录**：打一个二维码，手机浏览器扫开就能录，边录边传回 Mac、自动走 `rex go`（经 Tailscale，只有你自己的设备连得上） |
 | `rex export [文件] [docx\|srt]` | 把稿子导出成 Word，或拿到字幕文件；录音台和手机页上也有这两个按钮 |
+| `rex join 录音1 录音2 …` | **几段合成一条**：同一场分几次录的接成一条，一份稿子、一份分析；转写过的不重转，原来那几条收进 `已合并/`。录音台里 ⌘ 点选几条，或者几个文件一起拖进来 |
 | `rex phone` | 取 iCloud 同步过来的 iPhone 语音备忘录 |
 | `rex url <链接>` | 下载播客单集音频并转写 |
 | `rex find <词>` | 搜所有稿子 |
@@ -137,6 +138,7 @@ rex app       # 打开录音台（之后常驻后台、开机自动起）
 | `tools/rex_app.py`、`tools/rex_app/` | 录音台网页界面 |
 | `tools/rex_link.py`、`tools/rex_link/` | 用手机录（`rex link`）的服务和页面 |
 | `tools/rex_export.py` | 导出 Word / 字幕 |
+| `tools/rex_join.py` | 几段合成一条 |
 | `tools/whisper-prompt.txt`、`tools/whisper-fix.txt` | 词表和确定性替换的模板：拷到 `~/.config/rex/` 下再改 |
 | `docs/manual.zh-CN.md`、`docs/manual.md` | 完整手册（中文、英文） |
 

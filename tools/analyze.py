@@ -116,6 +116,29 @@ def failed_lines(prefix):
     return proofread.spans(state.get("failed") or [])
 
 
+def parts_note(prefix):
+    """几段合成的录音（rex join，见 rex_join.py）：告诉 Claude 是怎么接的，免得把段与段之间的空当、
+    各段分开判的说话人，当成一场连续谈话里的事。不是合成的就空串"""
+    try:
+        with open(prefix + ".分段.json", encoding="utf-8") as fh:
+            seg = json.load(fh)
+    except (OSError, ValueError):
+        return ""
+    rows = [L("- 第 %d 段：从 %s 起，约 %d 分钟，原来叫「%s」，录于 %s", "- Part %d: from %s, about %d min, originally \"%s\", recorded %s")
+            % (i, proofread.stamp(p["start"]), max(1, round(p["duration"] / 60)), p["name"], p.get("recorded") or "?")
+            for i, p in enumerate(seg.get("segments") or [], 1)]
+    if len(rows) < 2:
+        return ""
+    note = L("这份稿子由 %d 段录音按时间顺序接成，段与段之间可能隔了一段时间。",
+             "This transcript joins %d recordings in time order; there may be gaps between them.") % len(rows)
+    if seg.get("reused_transcripts") and not seg.get("tracks"):
+        # 只陈述事实，不带指令语气：材料里像任务的话 Claude 会当成任务去做（见 PREAMBLE 上面的注释）
+        note += L("各段的说话人是分开判断的：不同段里的同一个名字不一定是同一个人。",
+                  " Speakers were identified separately in each part: the same name in different parts isn't "
+                  "necessarily the same person.")
+    return note + "\n" + "\n".join(rows)
+
+
 def log(msg):
     print(msg, file=sys.stderr, flush=True)
 
@@ -143,6 +166,9 @@ def main():
     if hints:
         msg += L("\n<可能听错的地方>\n%s\n</可能听错的地方>\n",
                  "\n<possible_mishearings>\n%s\n</possible_mishearings>\n") % "\n".join(hints)
+    parts = parts_note(a.prefix)
+    if parts:
+        msg += L("\n<分段>\n%s\n</分段>\n", "\n<parts>\n%s\n</parts>\n") % parts
     unproofed = failed_lines(a.prefix)
     if unproofed:
         msg += L("\n<没校对的部分>稿子第 %s 行校对没成功，那几段还是 whisper 原稿，识别错误可能更多。</没校对的部分>\n",

@@ -63,6 +63,7 @@ rex app       # open the Recording Desk (it then stays in the background and sta
 | `rex app` | Recording Desk web UI at `http://127.0.0.1:8790`, running in the background and starting at login: record, review corrections (Y/N, or accept all at once), ask follow-up questions, search, double-click a recording to move it to the Trash |
 | `rex link` | **Record from your phone**: prints a QR code; open it in the phone's browser and record. Audio streams back to the Mac and goes through `rex go` (over Tailscale, so only your own devices can reach it) |
 | `rex export [file] [docx\|srt]` | Export a transcript as Word, or get its subtitle file; the Recording Desk and the phone page have the same two buttons |
+| `rex join rec1 rec2 …` | **Join one event recorded in parts** into a single recording: one transcript, one analysis. Existing transcripts are reused; the originals move to `已合并/`. In the Recording Desk, ⌘-click several, or drop several files in together |
 | `rex phone` | Import iPhone Voice Memos synced through iCloud |
 | `rex url <link>` | Download a podcast episode's audio and transcribe it |
 | `rex find <word>` | Search all transcripts |
@@ -119,6 +120,7 @@ A few names stay the same in both languages because they are file formats: the i
 | `tools/rex_app.py`, `tools/rex_app/` | Recording Desk web UI |
 | `tools/rex_link.py`, `tools/rex_link/` | Phone recording service and page (`rex link`) |
 | `tools/rex_export.py` | Word / subtitle export |
+| `tools/rex_join.py` | Join recordings of one event into one |
 | `tools/whisper-prompt.txt`, `tools/whisper-fix.txt` | Templates for your vocabulary hints and fixed replacements; copy them to `~/.config/rex/` and edit there |
 | `docs/manual.md`, `docs/manual.zh-CN.md` | Full manual (English, Chinese) |
 

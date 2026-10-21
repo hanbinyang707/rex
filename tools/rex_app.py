@@ -162,6 +162,16 @@ def proof_summary(prefix):
     return None
 
 
+def load_parts(prefix):
+    """几段合成的录音（rex join，见 rex_join.py）：每段从第几秒起、多长、原来叫什么。不是合成的就空"""
+    try:
+        with open(prefix + ".分段.json", encoding="utf-8") as fh:
+            segs = json.load(fh).get("segments") or []
+    except (OSError, ValueError, AttributeError):
+        return []
+    return segs if len(segs) > 1 else []
+
+
 def scan():
     groups = {}
     try:
@@ -200,12 +210,19 @@ def scan():
         mtimes = [os.path.getmtime(p) for p in audio + ([txt] if has_txt else [])]
         if not info["when"]:
             info["when"] = datetime.datetime.fromtimestamp(max(mtimes) if mtimes else 0).strftime("%Y-%m-%d %H:%M")
+        parts = load_parts(prefix)
+        joined_from = []          # 合成前那几条叫什么（拖进来合成的记的是文件名），连同中间合成过的那条
+        for x in parts:
+            for k in [x.get("key") or x.get("name")] + list(x.get("via") or []):
+                if k and k not in joined_from:
+                    joined_from.append(k)
         out.append(dict(info, key=key, audio=len(audio), split=len(audio) > 1,
                         duration=round(max([durs.get(p, 0) for p in audio] or [0])),
                         transcribed=has_txt, chars=(os.path.getsize(txt) // 3) if has_txt else 0,
                         dialogue=dialogue, speakers=speakers_seen[:6],
                         proof=proof_summary(prefix), analyzed=os.path.exists(prefix + ".分析.md"),
                         chats=len(load_chat(prefix).get("turns", [])),
+                        parts=len(parts), joined_from=joined_from,      # 录音台按它跟到合成的这条上
                         busy=JOBS.busy(key)))
     out.sort(key=lambda r: r["when"], reverse=True)
     return out
@@ -231,7 +248,7 @@ def detail(key):
     info = parse_name(key) or {"when": "", "source": L("其它", "Other"), "origin": "", "title": key}
     return dict(info, key=key, entries=rows, proof=state, analysis=analysis,
                 chat=load_chat(prefix).get("turns", []), audio=[os.path.basename(p) for p in audio_files(key)],
-                busy=JOBS.busy(key), has_session=bool(session_of(prefix)))
+                parts=load_parts(prefix), busy=JOBS.busy(key), has_session=bool(session_of(prefix)))
 
 
 def audio_files(key):
@@ -246,7 +263,7 @@ def audio_files(key):
 
 # 一条录音在磁盘上是这些文件：音频（老的 --split 是两条分轨）、稿子、校对和分析的产物。只认这些确切的名字，
 # 不按前缀通配——X 和 X_关键词 是两条不同的录音
-REC_SUFFIXES = (".txt", ".srt", ".whisper.srt", ".校对.json", ".校对.md", ".分析.md", ".对话.json", ".docx")
+REC_SUFFIXES = (".txt", ".srt", ".whisper.srt", ".校对.json", ".校对.md", ".分析.md", ".对话.json", ".docx", ".分段.json")
 
 
 def recording_files(key):
@@ -427,10 +444,11 @@ class Jobs:
 
     # state 只有「排队 / 进行中 / 完成 / 出错」这四个固定值，不跟界面语言走：这里和 app.js 都拿它比较，
     # app.js 显示时再翻成英文。label 只给人看，跟着语言走
-    def add(self, kind, key, label, steps):
-        """steps：要依次跑的命令；某一步可以是函数，到时候才算出命令（比如导入完才知道文件名）。"""
+    def add(self, kind, key, label, steps, keys=()):
+        """steps：要依次跑的命令；某一步可以是函数，到时候才算出命令（比如导入完才知道文件名）。
+        keys：这个任务还管着哪几条录音（合成一条时的那几条），跑完之前它们都算「正在处理」。"""
         jid = uuid.uuid4().hex[:8]
-        job = {"id": jid, "kind": kind, "key": key, "label": label, "state": "排队",
+        job = {"id": jid, "kind": kind, "key": key, "keys": list(keys), "label": label, "state": "排队",
                "added": time.time(), "started": None, "ended": None, "rc": None,
                "log": os.path.join(CACHE, "app-jobs", "%s-%s.log" % (time.strftime("%Y%m%d-%H%M%S"), jid)),
                "_steps": steps}
@@ -443,7 +461,7 @@ class Jobs:
     def busy(self, key):
         # 自己排的任务（转写改名 X → X_关键词 之后，新名字也算同一条），加上别处（收件箱监视、终端）正在跑的
         with self.lock:
-            mine = any((j["key"] == key or (j["key"] and key.startswith(j["key"] + "_")))
+            mine = any((j["key"] == key or (j["key"] and key.startswith(j["key"] + "_")) or key in j["keys"])
                        and j["state"] in ("排队", "进行中") for j in self.items)
         return mine or go_locked(key)
 
@@ -614,15 +632,17 @@ UPLOAD_EXT = {".m4a", ".mp3", ".wav", ".aac", ".flac", ".ogg", ".opus", ".caf", 
               ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".3gp", ".qta"}
 
 
-def save_upload(name, length, rfile, mtime=None):
-    """存进收件箱。mtime 是原文件的修改时间：收件箱按它给录音起名（日期_时刻），不传就成了「上传那一刻」。"""
+def save_upload(name, length, rfile, mtime=None, folder=None):
+    """存进收件箱（folder 给了就存那里：要合成一条的几个文件先放暂存区）。mtime 是原文件的修改时间：
+    收件箱按它给录音起名（日期_时刻），合成时按它定开录时刻；不传就成了「上传那一刻」。"""
     name = os.path.basename(name.replace("\\", "/")).strip() or "录音.m4a"
     if os.path.splitext(name)[1].lower() not in UPLOAD_EXT:
         return None
     if length <= 0 or length > UPLOAD_MAX:
         return None
-    os.makedirs(INBOX, exist_ok=True)
-    tmp = os.path.join(INBOX, ".upload-%s.part" % uuid.uuid4().hex[:8])     # 点开头：收件箱不认，传完才改名
+    folder = folder or INBOX
+    os.makedirs(folder, exist_ok=True)
+    tmp = os.path.join(folder, ".upload-%s.part" % uuid.uuid4().hex[:8])     # 点开头：收件箱不认，传完才改名
     left = length
     try:
         with open(tmp, "wb") as fh:
@@ -645,14 +665,84 @@ def save_upload(name, length, rfile, mtime=None):
                 os.remove(tmp)      # 没传完、连接断了：别把半截留在收件箱里
             except OSError:
                 pass
-    dest = os.path.join(INBOX, name)
+    dest = os.path.join(folder, name)
     stem, ext = os.path.splitext(name)
     i = 2
     while os.path.exists(dest):
-        dest = os.path.join(INBOX, "%s-%d%s" % (stem, i, ext))
+        dest = os.path.join(folder, "%s-%d%s" % (stem, i, ext))
         i += 1
     os.replace(tmp, dest)
     return dest
+
+
+# ---------------------------------------------------------------- 几段合成一条（rex join）
+
+# 一次拖进来、要合成一条的几个文件：先传到这里（每次拖一组，组名是页面起的随机串），都传完再排 rex join。
+# 和 rex_join.py 的 STAGE_DIR 是同一个：合完它把这几个文件挪进 已合并/。点开头：列表、收件箱都不认
+STAGE = os.path.join(REX_DIR, ".join")
+GROUP_RE = re.compile(r"^[0-9a-f]{8,32}$")
+
+
+def stage_dir(group):
+    return os.path.join(STAGE, group) if GROUP_RE.match(group or "") else None
+
+
+def clear_stale_stages(max_age=86400):
+    """传了一半就关了页面、合成出错剩下的：放了一天还在的移到废纸篓（不直接删）"""
+    try:
+        names = os.listdir(STAGE)
+    except OSError:
+        return
+    for g in names:
+        d = os.path.join(STAGE, g)
+        try:
+            if os.path.isdir(d) and time.time() - os.path.getmtime(d) > max_age:
+                to_trash(d)
+        except OSError:
+            pass
+
+
+def queue_join(data):
+    """录音台的「合成一条」：列表里选的几条（keys），或者刚拖进来、传到暂存区的几个文件（group + files），
+    按给的顺序排一个 rex join（合成，再整条走 rex go）。返回 (成没成, 说明, 任务)"""
+    name = re.sub(r"\s+", " ", str(data.get("name") or "")).strip()[:80]
+    keys, paths = [], []
+    if data.get("group"):
+        d = stage_dir(str(data["group"]))
+        if not d or not os.path.isdir(d):
+            return False, L("刚传上来的文件找不到了，再拖一次", "The files just uploaded are gone; drop them again"), None
+        for n in data.get("files") or []:
+            n = str(n)
+            if n != os.path.basename(n) or n.startswith(".") or not os.path.isfile(os.path.join(d, n)):
+                return False, L("刚传上来的文件少了一个：%s", "One of the files just uploaded is missing: %s") % n, None
+            paths.append(os.path.join(d, n))
+    else:
+        now = recording_now()
+        for k in data.get("keys") or []:
+            k = str(k)
+            title = (parse_name(k) or {"title": k})["title"]
+            files = audio_files(k) if k and "/" not in k else []
+            if not files:
+                return False, L("「%s」没有音频文件（刷新一下）", "\"%s\" has no audio file (refresh)") % title, None
+            if len(files) > 1:
+                return False, L("「%s」是老的分轨录音（两个文件），还不能合成", "\"%s\" is an old split recording "
+                                "(two files) and can't be joined yet") % title, None
+            if now.get("on") and os.path.basename(files[0]) in now.get("files", []):
+                return False, L("「%s」正在录，先停下再合成", "\"%s\" is still recording. Stop it first") % title, None
+            if JOBS.busy(k):
+                return False, L("「%s」正在处理，等它跑完再合成", "\"%s\" is being processed. Wait for it to finish") % title, None
+            keys.append(k)
+            paths.append(files[0])
+    if len(paths) < 2:
+        return False, L("要两段以上才能合成一条", "Joining needs at least two recordings"), None
+    if len(set(paths)) < len(paths):
+        return False, L("同一条选了两遍", "The same recording was chosen twice"), None
+    clear_stale_stages()
+    first = (parse_name(keys[0]) or {"title": keys[0]})["title"] if keys else os.path.basename(paths[0])
+    job = JOBS.add("join", "", L("合成 %d 段：%s", "Join %d recordings: %s") % (len(paths), name or first),
+                   [rex_cmd("join", *(paths + (["--name", name] if name else [])))], keys=keys)
+    return True, L("排上了：先合成一条，再一起转写、校对、分析", "Queued: joined into one, then transcribed, proofread "
+                   "and analyzed together"), job
 
 
 PHONE_NO_ACCESS = L("录音台读不了语音备忘录：macOS 只让有「完整磁盘访问权限」的终端读它。在终端里跑 rex phone "
@@ -943,16 +1033,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         try:
             if u.path == "/api/upload":
-                name = urllib.parse.parse_qs(u.query).get("name", ["录音.m4a"])[0]
+                qs = urllib.parse.parse_qs(u.query)
+                name = qs.get("name", ["录音.m4a"])[0]
+                group = qs.get("group", [""])[0]
+                folder = stage_dir(group) if group else None
+                if group and not folder:
+                    return self.send_json({"ok": False, "msg": L("分组不对", "Invalid group")}, 400)
                 try:
                     mtime = float(self.headers.get("X-Rex-Mtime") or 0) or None
                 except ValueError:
                     mtime = None
-                dest = save_upload(name, length, self.rfile, mtime)
+                dest = save_upload(name, length, self.rfile, mtime, folder)
                 if not dest:
                     return self.send_json({"ok": False, "msg": L("没传上：不是音视频文件、太大，或者没传完",
                                                                  "Upload failed: not an audio or video file, too large, "
                                                                  "or incomplete")}, 400)
+                if folder:                       # 要合成的：先放着，等这一组传完由 /api/join 排
+                    return self.send_json({"ok": True, "name": os.path.basename(dest)})
                 if not watcher_installed():      # 没装收件箱监视，就自己排一个
                     JOBS.add("inbox", "", L("处理收件箱", "Process the inbox"), [rex_cmd("go", "--inbox")])
                 return self.send_json({"ok": True, "msg": L("放进收件箱了：%s", "Added to the inbox: %s") % os.path.basename(dest)})
@@ -990,6 +1087,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 JOBS.add("go", key, L("处理：%s", "Process: %s") % (parse_name(key) or {"title": key})["title"],
                          [rex_cmd("go", files[0])])
                 return self.send_json({"ok": True, "msg": L("排上了", "Queued")})
+            if u.path == "/api/join":
+                ok, msg, job = queue_join(data)
+                return self.send_json({"ok": ok, "msg": msg, "job": job["id"] if job else None})
+            if u.path == "/api/join/cancel":     # 一组传到一半不传了：已经传上来的移到废纸篓
+                d = stage_dir(str(data.get("group") or ""))
+                if d and os.path.isdir(d):
+                    to_trash(d)
+                return self.send_json({"ok": True})
             if u.path == "/api/chat":
                 q = (data.get("q") or "").strip()
                 if not q:
@@ -1042,6 +1147,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 def main():
     os.makedirs(CACHE, exist_ok=True)
+    clear_stale_stages()
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     srv.daemon_threads = True
     log(L("录音台：http://127.0.0.1:%d/   录音在 %s", "Recording Desk: http://127.0.0.1:%d/   recordings in %s") % (PORT, REX_DIR))
