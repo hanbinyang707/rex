@@ -23,17 +23,88 @@ whisper 的自动语言识别**只在文件开头做一次**，之后整个文�
 
 ## 两个独立的毛病，两个独立的修法
 
-**一、重复陷阱 → `-mc 0`。**whisper 默认把已经转出来的文本当上下文喂回去
+**一、重复陷阱 → 前文不回灌。**whisper 默认把已经转出来的文本当上下文喂回去
 （`--max-context -1`，无限）。一旦开始重复，重复本身进了上下文，于是更倾向重复，
-正反馈。实测同一个文件：
+正反馈。实测同一个文件（按英文硬解）：
 
     -mc 默认    最高频那一行重复 54 次
     -mc 0       降到 4 次
 
+（2026-11-03 用 whisper.cpp 1.9.2、带 VAD 重测，两个数分毫不差；不开 VAD 是 171 和 2。）
 代价是跨句连贯性略降（它不再知道前文说过什么）。对口述稿这笔买卖划算——
 连贯性丢一点可以接受，整段变成同一句话不行。
 
 **二、语言锁死 → 分段探测，每段用自己的语言解码。**
+
+## `-mc 0` 把词表也关掉了
+
+2026-10-27 才发现：带着 `-mc 0`，`--prompt` 被**整个忽略**。同一段 900 秒的课，
+加不加 whisper-prompt.txt，输出的 .txt 和 .srt 逐字节相同；再加 `--carry-initial-prompt`
+也一样。whisper.cpp 给每个 30 秒窗口拼提示的那段（src/whisper.cpp 的
+whisper_full_with_state，1.8.1 到 1.9.5 都一样）是：
+
+    if (n_max_text_ctx > 0 && 温度 < 0.5) {
+        上限 = min(-mc, n_text_ctx/2 = 224)
+        提示 = [PREV] + 词表（开了 --carry-initial-prompt 才每个窗口都有）
+                      + 前文最后 (上限 − 词表 − 1) 个 token
+    }
+
+`-mc 0` 时整个 if 不进，词表、`--carry-initial-prompt`、前文三样一起没了。所以从加上
+`-mc 0` 那天起词表就没生效过，而手册和 rex 的提示一直在教人先往里加词。（校对和起名
+也读这份词表，那两处一直是好的；没生效的只是转写时的偏置。）
+
+修法是让 `-mc` **刚好**装下词表：`--carry-initial-prompt -mc (词表的 token 数 + 1)`。
+前文的份额 = 上限 − 词表 − 1 = 0，每个窗口都带词表，回灌照样一个 token 都没有。
+拿 WHISPER_DEBUG 编的 1.9.2 看过每个窗口实际收到什么（137 token 的词表）：
+
+    -mc 0                 [SOT][zh][TRANSCRIBE]                  词表没进去
+    -mc 138 --carry       [PREV] 词表137个 [SOT][zh][TRANSCRIBE]  每个窗口都这样，前文 0 个
+    -mc 139 --carry       第二个窗口起多了一个前文 token
+    -mc 100 --carry       词表只剩后 99 个，开头被截掉
+    -mc 138 不带 --carry   第二个窗口词表只剩「基、影壁。」，其余全是前文
+    -mc 138 --carry 没词表 第二个窗口起 135 个 token 全是前文    所以没词表时还是 -mc 0
+
+**差一点都不行。**按英文硬解的那个文件（带 VAD），最高频那一行：
+
+    -mc 116 --carry + 115 token 的词表           1 次
+    -mc 224 --carry + 同一份词表（前文漏进来 108 个） 42 次
+    -mc 默认 + 同一份词表（不带 --carry）         119 次
+
+所以 token 数得跟 whisper 自己数的一样，不能估。prompt_tokens 照抄了 whisper.cpp 的切法，
+跟 whisper-cli 自己报的数逐条对过。`--carry-initial-prompt` 是 1.8.1 才有的，更老的
+whisper-cli 不带词表、照旧 `-mc 0`，并且会说出来。
+
+## 词表怎么写，稿子就长什么样
+
+词表每个窗口都在，whisper 会照着它的样子写。同样 20 个词、同一段 150 秒的讲课：
+
+    a、b、c                        34 条字幕，一条中位 2 秒
+    常见词：a、b、c                 35 条，3 秒
+    a，b，c                         16 条，6 秒
+    a、b、c。                        5 条，30 秒   ← 只差一个句号
+    a, b, c                          5 条，30 秒
+    以下是普通话讲课。常见词：a、b、c   5 条，30 秒
+
+认词的效果差不多（20 分钟的讲课里各种写法纠回来的词数相当），但一条字幕 30 秒的话，字幕、录音台
+搜索、校对定位都只能准到 30 秒，校对按行发给 Claude 的那一份也大了十几倍。所以默认模板一个词都
+不带，手册教的是只列词；词表里有句号或逗号时转写开头会说一声。
+
+## 词表的代价
+
+这是偏置，会纠对也会带偏。两小时的建筑史课，从不带词表的稿子里挑 20 个听错的词（117 token）：
+
+    表里的词出现   12 → 55 次，已知的错写法 42 → 6 处，字数不变（24791 → 24825）
+    最高频那一行   8 字以上的还是 1 次，重复没回来
+    一条字幕       中位 1.8 → 3.3 秒，条数 3150 → 1045。一半的时间落在 10 秒以上的字幕里（原来 2.3 秒）
+    转写时间       慢约 7%
+
+  · 逐处读过：约 45 处纠对，约 15 处带偏。带偏的多半是表外发音相近的名字：「乐科布希」成了「乐克洛德」，
+    「埃及金字塔」成了「爱斯梅基 金士坦」。把它们也加进表（25 个词）基本都回来了，金字塔 0 → 5 处，
+    假的「克洛德」只剩一处；代价是表长了，「爱斯梅拉达」「卡西莫多」各少认对一两处
+  · 听不清的地方可能填进表里的词：一段讨论数据的录音里冒出一次「赤心巡天」
+  · 偶尔漏一段：只列词转的 6.5 小时里 3 处，每处 15~30 秒，都在说话稀疏、含混的地方，同样的录音不带词表没漏。
+    不是 no-speech 规则扔的（-nth 1 还是漏），是解码器自己走完了这个窗口。漏的时候不报错
+  · 没人说话时不会照抄词表：纯噪声开 VAD 一个字都没有，关 VAD 时编的还是那些字幕组署名
 
 ## 探测的成本，以及为什么是这个网格
 
@@ -64,8 +135,10 @@ whisper 的自动语言识别**只在文件开头做一次**，之后整个文�
 """
 
 import argparse
+import functools
 import os
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -113,6 +186,10 @@ MIN_RUN = 30         # 短于这么多秒的语言段并进邻居
 MAX_BISECT = 24      # 二分的总次数上限，防止来回切换的录音把探测拖爆
 
 NOISE = re.compile(r'^(ggml_|load_backend|read_audio_data|whisper_|main:|system_info|init:)')
+# whisper.cpp 切词用的正则（C locale 下 [[:alpha:]] 只有 ASCII 字母），见 prompt_tokens
+WORD = re.compile(rb"'s|'t|'re|'ve|'m|'ll|'d| ?[A-Za-z]+| ?[0-9]+| ?[^\sA-Za-z0-9]+|\s+(?!\S)|\s+")
+# 词表里这些标点会让 whisper 改写整段（见文件头）。英文句点只算词尾的，Node.js 不算
+SENTENCE_LIKE = re.compile(r"[。，,]|\.(?:\s|$)")
 SRT_TIME = re.compile(r'(\d\d):(\d\d):(\d\d),(\d\d\d) --> (\d\d):(\d\d):(\d\d),(\d\d\d)')
 
 
@@ -280,13 +357,65 @@ def to_runs(points, dur):
     return [(a, b, l) for a, b, l in merged if b - a > 0.5]
 
 
+@functools.lru_cache(maxsize=None)
+def prompt_tokens(model, text):
+    """词表在 whisper 眼里是几个 token，以及最多能带几个。读不出模型返回 (None, None)。
+
+    照抄 whisper.cpp 的切法（src/whisper.cpp 的 tokenize）：先按 WORD 切成「词」，每个词
+    再从左往右贪心取词表里最长的一截。词表就存在模型文件开头。跟 whisper-cli 自己数的
+    逐条对过：中文、英文、中英混排、数字空白、别的文字，6 条全对。"""
+    try:
+        with open(model, "rb") as fh:
+            head = fh.read(56)
+            if struct.unpack_from("<I", head, 0)[0] != 0x67676d6c:     # 'ggml'
+                return None, None
+            n_text_ctx = struct.unpack_from("<i", head, 24)[0]
+            n_mel, n_fft = struct.unpack_from("<ii", head, 48)
+            fh.seek(4 * n_mel * n_fft, 1)                              # 跳过梅尔滤波器
+            n_vocab = struct.unpack("<i", fh.read(4))[0]
+            buf = fh.read(4 << 20)
+        vocab, pos = set(), 0
+        for _ in range(n_vocab):
+            ln = struct.unpack_from("<I", buf, pos)[0]
+            vocab.add(buf[pos + 4:pos + 4 + ln])
+            pos += 4 + ln
+        longest = max(len(t) for t in vocab)
+    except (OSError, struct.error, ValueError):
+        return None, None
+    n = 0
+    for w in WORD.findall(text.encode("utf-8")):
+        i = 0
+        while i < len(w):
+            for j in range(min(len(w), i + longest), i, -1):
+                if w[i:j] in vocab:
+                    n += 1
+                    i = j
+                    break
+            else:
+                i += 1
+    # 带词表时一个窗口的提示上限是 n_text_ctx/2，开头还要占一个 [PREV]
+    return n, n_text_ctx // 2 - 1
+
+
+@functools.lru_cache(maxsize=None)
+def can_carry():
+    """--carry-initial-prompt 是 whisper.cpp 1.8.1 才有的。更老的 whisper-cli 碰到不认识的参数
+    打一屏用法就退出、退出码还是 0，稿子一个字都不出——所以先问一句。"""
+    r = sh(["whisper-cli", "--help"])
+    return "--carry-initial-prompt" in r.stdout + r.stderr
+
+
 def run_whisper(model, wav, out, lang, prompt, vad, vpad, vmodel, echo, offset,
                 hide_paths=False):
     cmd = ["whisper-cli", "-m", model, "-f", wav, "-l", lang,
-           "-mc", "0",              # 上下文回灌是重复陷阱的燃料，见文件头
            "-otxt", "-osrt", "-of", out, "-np"]
     if prompt:
-        cmd += ["--prompt", prompt]
+        # -mc 0 会把词表一起关掉。改成每个窗口都重喂词表，-mc 刚好装下它：
+        # 前文回灌的份额是 -mc 减去词表再减一，等于 0。见文件头
+        n, cap = prompt_tokens(model, prompt)
+        cmd += ["-mc", str(min(n, cap) + 1), "--carry-initial-prompt", "--prompt", prompt]
+    else:
+        cmd += ["-mc", "0"]         # 上下文回灌是重复陷阱的燃料，见文件头
     if vad and vmodel and os.path.exists(vmodel):
         cmd += ["--vad", "-vm", vmodel, "-vp", str(vpad)]
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -378,6 +507,33 @@ def main():
         with open(a.prompt_file, encoding="utf-8") as fh:
             prompt = " ".join(l.strip() for l in fh
                               if l.strip() and not l.startswith("#"))
+    if prompt:
+        n, cap = prompt_tokens(a.model, prompt)
+        if not can_carry():
+            log(L("  ⚠️ 这个 whisper-cli 太旧，不认 --carry-initial-prompt（要 1.8.1 以上），"
+                  "这次不带 whisper-prompt.txt 转。升级：brew upgrade whisper-cpp",
+                  "  ⚠️ This whisper-cli is too old for --carry-initial-prompt (needs 1.8.1 or later); "
+                  "transcribing without whisper-prompt.txt this time. To upgrade: brew upgrade whisper-cpp"))
+            prompt = ""
+        elif n is None:
+            # 数不出 token 就定不了 -mc：定大了前文会漏进来，定小了词表被截。宁可不带词表
+            log(L("  ⚠️ 读不出模型文件的 token 表，算不了 whisper-prompt.txt 多长，这次不带它转",
+                  "  ⚠️ Couldn't read the token table in the model file, so whisper-prompt.txt can't be measured; "
+                  "transcribing without it this time"))
+            prompt = ""
+        elif n > cap:
+            log(L("  ⚠️ 词表 %d token，超过上限 %d：开头 %d 个会被丢掉，把 whisper-prompt.txt 删短一点",
+                  "  ⚠️ The vocabulary list is %d tokens, over the limit of %d: the first %d will be dropped. "
+                  "Shorten whisper-prompt.txt") % (n, cap, n - cap))
+        else:
+            log(L("  词表 %d token（上限 %d），中文段的每个窗口都带上",
+                  "  Vocabulary list: %d tokens (limit %d), fed to every window of Chinese segments") % (n, cap))
+        if prompt and SENTENCE_LIKE.search(prompt):
+            log(L("  词表里有句号或逗号：whisper 会照着写成整段，一条字幕可能有 30 秒。"
+                  "想要一句一条就只列词，用顿号或空格隔开",
+                  "  The vocabulary list has full stops or commas: whisper will imitate them and write whole "
+                  "paragraphs, up to 30 seconds per cue. For one sentence per cue, list only the words, "
+                  "separated by 、 or spaces"))
 
     vad = not a.no_vad
     dur = duration(a.audio)

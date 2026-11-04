@@ -558,7 +558,7 @@ When probing a monolingual recording finds only one language, that language is *
 rex text --lang zh 某文件.m4a
 ```
 
-### The repetition trap: `-mc 0`
+### The repetition trap: no previous text fed back
 
 Those 167 repetitions above weren't only the fault of the wrong language choice. By default whisper feeds the text it has already transcribed back in as context (`--max-context -1`, unlimited), so **once it starts repeating, the repetition itself enters the context, which makes it even more inclined to repeat**: a positive feedback loop. Measured on the same file, again force-decoded as English:
 
@@ -566,23 +566,68 @@ Those 167 repetitions above weren't only the fault of the wrong language choice.
 |---|---|
 | `-mc` default (unlimited context) | 54 times |
 | `-mc 0` | 4 times |
+| `--carry-initial-prompt -mc 116`, with a 115-token vocabulary list | 1 time |
 
-Now `-mc 0` is always passed. The cost is slightly lower coherence across sentences (it no longer knows what was said earlier), which is a good trade for dictation transcripts: losing a little coherence is acceptable; a whole passage turning into the same sentence is not.
+(Re-measured on 2026-11-03 with whisper.cpp 1.9.2 and VAD on: the first two rows came out exactly the same. With VAD off, the three rows are 171 / 2 / 1.)
+
+Now **not a single token of previous text is fed back**: without a vocabulary list rex passes `-mc 0`; with one it passes `--carry-initial-prompt -mc <list length + 1>` (the next section explains why that combination). The cost is slightly lower coherence across sentences (it no longer knows what was said earlier), which is a good trade for dictation transcripts: losing a little coherence is acceptable; a whole passage turning into the same sentence is not.
 
 The naming layer has its own independent guard too: the same sentence counts at most twice per transcript, and any further occurrences don't count toward word frequency. **Don't let one sentence repeated hundreds of times decide what the whole transcript is called.**
 
 ### Misheard words: two layers
 
-**Layer 1: `tools/whisper-prompt.txt`** — a prompt vocabulary list fed to the model before transcription. In testing, it works:
+**Layer 1: `tools/whisper-prompt.txt`** — a vocabulary list fed to the model with every 30-second window of Chinese segments during transcription. (Segments that language probing identifies as English don't get it. Proofreading and file naming read this list too.)
 
-| | Result |
-|---|---|
-| Without the vocabulary list | 往文 / 赤心寻天 / 双文 / 新国变 / 哲理变 |
-| With the vocabulary list | 网文 ✓ 赤心巡天 ✓ 爽文 ✓ 新国辩 ✓ 哲理辩 ✓ |
+> ⚠️ **Before 2026-11 the transcription step never actually used this list.** The `-mc 0` from the previous section switched it off as well: whisper.cpp only assembles a prompt when `-mc` is greater than 0, so with `-mc 0` the list never reached the model, and adding `--carry-initial-prompt` changed nothing. In testing, the same 900-second lecture came out byte-for-byte identical with and without the list. During that time only the deterministic replacements of layer 2 changed the transcription. (Proofreading and file naming always worked.)
 
-**Keep this file short.** The length limit is about 224 tokens (one Chinese character is 1–2 tokens); anything beyond that gets truncated, which makes things worse rather than better: in testing, a longer vocabulary list gave even worse results than a short one. Only include words that **have actually been misheard**.
+What rex does now is pass `--carry-initial-prompt` (every window gets the list) together with `-mc <the list's token count + 1>`. The prompt whisper builds for each window is "the list + the last few tokens of previous text", and previous text gets `-mc` minus the list minus one: exactly 0. The list takes effect, and previous text still isn't fed back. whisper.cpp's debug log confirms it: every window receives the list and the task tokens, with no previous text. **The number has to be exact**: with the same 115-token list, on the file force-decoded as English, `-mc 116` gives 1 for the most frequent line, while `-mc 224` (letting in 108 tokens of previous text) is back at 42.
 
-**Layer 2: `tools/whisper-fix.txt`** — deterministic replacements applied after transcription, one `错的→对的` (wrong→right) per line. The prompt is only a bias and isn't guaranteed to take effect (the same word may come out right in one recording and wrong in another); whatever it can't straighten out goes here.
+**List only the words, separated by `、` or spaces; line breaks are fine. Don't write sentences, and don't use full stops or commas:**
+
+```
+网文、爽文、即兴、neo-soul、
+诡秘之主、奇葩说
+```
+
+The list is present in every window, and whisper imitates its style. The same 20 words on the same 150 seconds of lecture:
+
+| How the list is written | Cues | Median cue length |
+|---|---|---|
+| `a、b、c` | 34 | 2 s |
+| `常见词：a、b、c` | 35 | 3 s |
+| `a，b，c` | 16 | 6 s |
+| `a、b、c。` | 5 | 30 s |
+| `a, b, c` | 5 | 30 s |
+| `以下是普通话讲课。常见词：a、b、c` | 5 | 30 s |
+
+**One full stop** is enough to go from one sentence per cue to one block per window. Words are corrected about equally well and you get punctuation, but subtitles, Recording Desk search and proofreading positions are then only accurate to 30 seconds, each proofreading request to Claude gets more than ten times bigger (it goes by lines), and two-person recordings lose half their turns and keep more echo. Write sentences only if you want punctuated paragraphs. When the list contains full stops or commas, the start of the transcription says so.
+
+Measured on 2026-11-03 on a two-hour architectural history lecture. The list was 20 words picked from what the transcript without a list got wrong:
+
+| | No list | 20 words, words only | 5 misled words added | 20 words, written as a sentence |
+|---|---|---|---|---|
+| Times the list's words appear (not counting 哥特, already common) | 12 | 55 | 47 | 62 |
+| Known wrong forms (巴黎春午院, 狐狼节…) | 42 | 6 | 10 | 9 |
+| The correct word 金字塔 | 4 | 0 | 5 | 0 |
+| Cues | 3150 | 1045 | 1324 | 259 |
+| Median cue length | 1.8 s | 3.3 s | 2.9 s | 27.9 s |
+| Most frequent line (8+ characters) | 1 time | 1 time | 2 times | 1 time |
+| Chinese characters | 24791 | 24825 | 24780 | 24953 |
+
+The repetition did not come back. Every hit in the second column was read: about 45 were real corrections (雨果, 巴黎圣母院, 万神庙…) and about 15 were pulled off course. Those were mostly **similar-sounding names that weren't on the list**: 乐科布希 became 乐克洛德, 拉贝尔 became 拉达, 埃及金字塔 became 爱斯梅基 金士坦. The third column adds them (`埃及 金字塔 勒·柯布西耶 拉斐尔 米开朗基罗`), and they all came back, leaving one false 克洛德; the price of the longer list is that 爱斯梅拉达 and 卡西莫多 each lost a correct hit or two. Transcription is about 7% slower (20 minutes of lecture: 250 s → 268 s).
+
+**What it costs.** This is a bias: it corrects and it misleads, so read the transcript yourself:
+
+- **It can pull similar-sounding words off course.** See the table above. When you see this, add the affected words to the list too.
+- **Unclear passages can get filled with a word from the list.** A recording about data analysis produced one 赤心巡天 at a point where the speech was unclear.
+- **Occasionally a passage goes missing.** In 6.5 hours transcribed with a words-only list, 3 passages of 15–30 seconds produced no text, all where speech was sparse or indistinct; the same recordings without a list (3 hours) had none. Nothing reports it when this happens. If an important recording doesn't add up, move the list aside and transcribe it again to compare.
+- It does **not** copy the list out when nobody is talking: pure noise with VAD on gives no text at all; with VAD off it makes up the same subtitle credits as without a list, none of the list's words (see "Why a track is empty" below).
+
+**Keep this file short.** The limit is 223 tokens (one Chinese character is 1–2 tokens); anything beyond that is cut off **from the beginning**, and an earlier test (2026-08, a 33-second sample) found a longer list worse than a short one. Each transcription starts by printing "Vocabulary list: N tokens (limit 223)" and warns if the list is over. Only include words that **have actually been misheard**.
+
+whisper-cli must be 1.8.1 or later (that's when `--carry-initial-prompt` appeared). Older versions transcribe without the list, and say so.
+
+**Layer 2: `tools/whisper-fix.txt`** — deterministic replacements applied after transcription, one `错的→对的` (wrong→right) per line. The list is only a bias and isn't guaranteed to take effect (the same word may come out right in one recording and wrong in another); whatever it can't straighten out goes here.
 
 > ⚠️ Chinese has no word boundaries, so this is an **unconditional string replacement** and can hit text it shouldn't. `往文→网文` would turn "通往文学" ("leading to literature") into "通网文学". Only include misrecognitions that are distinctive enough. Every replacement is printed; if you see a wrong one, delete that line.
 

@@ -1121,7 +1121,7 @@ phone() {
   say ""
   transcribe_one "$out"
   say ""
-  sayL "  ${C_D}认错词：whisper-prompt.txt（偏置）→ whisper-fix.txt（确定性替换），放在 ~/.config/rex/（没有就从 ${TOOLS_DIR}/ 拷模板过去）${C_0}" "  ${C_D}Misrecognized words: whisper-prompt.txt (bias) → whisper-fix.txt (deterministic replacements), both in ~/.config/rex/ (if missing, copy the templates from ${TOOLS_DIR}/)${C_0}"
+  sayL "  ${C_D}认错词：whisper-prompt.txt（偏置，只列词、要短）→ whisper-fix.txt（确定性替换），放在 ~/.config/rex/（没有就从 ${TOOLS_DIR}/ 拷模板过去）${C_0}" "  ${C_D}Misrecognized words: whisper-prompt.txt (bias; just the words, keep it short) → whisper-fix.txt (deterministic replacements), both in ~/.config/rex/ (if missing, copy the templates from ${TOOLS_DIR}/)${C_0}"
 }
 
 # ------------------------------------------------------------------ 丢进来的文件
@@ -1816,7 +1816,7 @@ text() {
     fi
   done
   say ""
-  sayL "  ${C_D}认错词：先往 whisper-prompt.txt 里加（偏置，可能不生效）；${C_0}" "  ${C_D}Misrecognized words: first add them to whisper-prompt.txt (bias, may not take effect);${C_0}"
+  sayL "  ${C_D}认错词：先往 whisper-prompt.txt 里加（偏置，可能不生效；只列听错过的词，顿号隔开，别写成句子）；${C_0}" "  ${C_D}Misrecognized words: first add them to whisper-prompt.txt (bias, may not take effect; just the misheard words, separated by 、 or spaces, no sentences);${C_0}"
   sayL "  ${C_D}还是错就写进 whisper-fix.txt 做确定性替换。两个都放 ~/.config/rex/（没有就从 ${TOOLS_DIR}/ 拷模板过去）${C_0}" "  ${C_D}if still wrong, put them in whisper-fix.txt for deterministic replacement. Both live in ~/.config/rex/ (if missing, copy the templates from ${TOOLS_DIR}/)${C_0}"
 }
 
