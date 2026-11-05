@@ -103,7 +103,8 @@ whisper-cli 不带词表、照旧 `-mc 0`，并且会说出来。
     假的「克洛德」只剩一处；代价是表长了，「爱斯梅拉达」「卡西莫多」各少认对一两处
   · 听不清的地方可能填进表里的词：一段讨论数据的录音里冒出一次「赤心巡天」
   · 偶尔漏一段：只列词转的 6.5 小时里 3 处，每处 15~30 秒，都在说话稀疏、含混的地方，同样的录音不带词表没漏。
-    不是 no-speech 规则扔的（-nth 1 还是漏），是解码器自己走完了这个窗口。漏的时候不报错
+    不是 no-speech 规则扔的（-nth 1 还是漏），是解码器自己走完了这个窗口。漏的时候 whisper 不报错，
+    所以转完要查一遍、补转回去（见最后一节和 whisper_gaps.py）
   · 没人说话时不会照抄词表：纯噪声开 VAD 一个字都没有，关 VAD 时编的还是那些字幕组署名
 
 ## 探测的成本，以及为什么是这个网格
@@ -132,6 +133,11 @@ whisper-cli 不带词表、照旧 `-mc 0`，并且会说出来。
 置信度低于 `MIN_P` 的点不算数，继承前一个已知的语言——安静段落、笑声、
 "嗯"，这些地方 whisper 会给出随机的语言。短于 `MIN_RUN` 秒的段并进邻居，
 否则一次误判就会把一整段切成三块，每块单独加载一次模型。
+
+## 转完再查一遍漏的
+
+解码器偶尔会走完一个窗口却不出字，稿子少一段，退出码照样是 0。所以转完拿 VAD 对一遍：
+有人声、稿子里却没字的地方逐处报出来，不带词表单独重转、补回去。见 whisper_gaps.py。
 """
 
 import argparse
@@ -143,6 +149,7 @@ import subprocess
 import sys
 import tempfile
 
+import whisper_gaps
 from i18n import L
 
 MAX_PROBES = 40      # 粗网格上限。再多的话光探测就比转写还贵
@@ -435,15 +442,18 @@ def run_whisper(model, wav, out, lang, prompt, vad, vpad, vmodel, echo, offset,
 def short(sec):
     """给人看的时刻：不到一小时 MM:SS，过了一小时 H:MM:SS。原来一律截成 MM:SS，
     65 分钟的录音分段显示成「59:30–00:56」，像是倒着走。"""
-    t = hhmmss(sec)
-    return t[3:8] if sec < 3600 else "%d:%s" % (int(sec) // 3600, t[3:8])
+    h, rest = hhmmss(sec).split(":", 1)       # 按四舍五入后的看：3599.9996 秒是 1:00:00，不是 00:00
+    return rest[:5] if h == "00" else "%d:%s" % (int(h), rest[:5])
 
 
 def hhmmss(sec):
-    sec = max(0.0, sec)
-    h, rem = divmod(int(sec), 3600)
-    m, s = divmod(rem, 60)
-    return "%02d:%02d:%02d.%03d" % (h, m, s, int(round((sec % 1) * 1000)))
+    # 先四舍五入成整毫秒再拆。原来秒和毫秒分开算，59.9996 秒拼出来是 00:00:59.1000——分语言转时 srt_shift
+    # 加偏移常碰上这种浮点和，SRT 里就多了一条读不懂的时间轴
+    ms = int(round(max(0.0, sec) * 1000))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+    return "%02d:%02d:%02d.%03d" % (h, m, s, ms)
 
 
 PROGRESS = re.compile(
@@ -485,6 +495,34 @@ def srt_shift(text, offset, start_index):
             "\n".join(body)))
         idx += 1
     return "\n\n".join(out), idx
+
+
+def check_gaps(a, runs, tmp, log):
+    """转完查一遍有人声却没出字的地方，不带词表单独重转、补回去。为什么、怎么判，见 whisper_gaps.py。
+
+    只是查，查的时候出了错也不能把已经转好的稿子搭进去：报出来，稿子不动。"""
+    if a.no_vad or not a.vad_model or not os.path.exists(a.vad_model):
+        log(L("  没开 VAD，这次不查漏转", "  VAD is off, so no gap check this time"))
+        return
+
+    def redo(s, e, lang):
+        # 出错返回 None，跟「转了、没出字」分开：不然 whisper 崩了也会报成「可能听不清」
+        clip, stem = os.path.join(tmp, "redo.wav"), os.path.join(tmp, "redo")
+        if os.path.exists(stem + ".srt"):
+            os.remove(stem + ".srt")
+        if not slice_wav(a.audio, s, e - s, clip):
+            return None
+        if run_whisper(a.model, clip, stem, lang, "", True, a.vad_pad, a.vad_model,
+                       lambda line: None, 0.0, hide_paths=True) or not os.path.exists(stem + ".srt"):
+            return None
+        with open(stem + ".srt", "rb") as fh:
+            return fh.read().decode("utf-8", "replace")
+
+    try:
+        whisper_gaps.check(a.audio, a.out, a.vad_model, runs, redo, log)
+    except Exception as ex:  # noqa: BLE001
+        log(L("  ⚠️ 查漏转时出错，稿子没动：%s", "  ⚠️ The gap check failed; the transcript is unchanged: %s")
+            % ("%s: %s" % (type(ex).__name__, ex)))
 
 
 def main():
@@ -544,7 +582,10 @@ def main():
             rc = run_whisper(a.model, a.audio, a.out, lang,
                              prompt if lang in ("zh", "auto") else "",
                              vad, a.vad_pad, a.vad_model, log, 0.0)
-            return 0 if os.path.exists(a.out + ".txt") else (rc or 1)
+            if not os.path.exists(a.out + ".txt"):
+                return rc or 1
+            check_gaps(a, [(0.0, dur, lang)], tmp, log)
+            return 0
 
         pts = probe_map(a.model, a.audio, dur, tmp, log)
         runs = to_runs(pts, dur) if pts else []
@@ -566,7 +607,10 @@ def main():
             rc = run_whisper(a.model, a.audio, a.out, only,
                              prompt if only == "zh" else "",
                              vad, a.vad_pad, a.vad_model, log, 0.0)
-            return 0 if os.path.exists(a.out + ".txt") else (rc or 1)
+            if not os.path.exists(a.out + ".txt"):
+                return rc or 1
+            check_gaps(a, [(0.0, dur, only)], tmp, log)
+            return 0
 
         log(L("  语言分段：", "  Language segments: ") + " · ".join(
             "%s %s–%s" % (l, short(s), short(e)) for s, e, l in runs))
@@ -613,6 +657,8 @@ def main():
             fh.write("\n\n".join(srts) + "\n")
         log(L("\n  %d 段合并完成（时间轴已按各段起点校正）",
               "\n  Merged %d segments (timestamps shifted to each segment's start)") % len(runs))
+        # 合并后的 .srt 已经是原文件的时间轴（srt_shift 加回了每段的起点），VAD 也量整个文件，直接比
+        check_gaps(a, runs, tmp, log)
     return 0
 
 

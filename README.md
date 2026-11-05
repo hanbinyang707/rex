@@ -114,7 +114,7 @@ A few names stay the same in both languages because they are file formats: the i
 | `tools/rex.sh` | The `rex` command (bash 3.2) |
 | `tools/audiocap.swift` | CoreAudio capture → named pipe → ffmpeg; system-audio tap; permission handling |
 | `tools/audiodev.swift` | List/switch audio devices, build the BlackHole multi-output device |
-| `tools/whisper_run.py` | Language probing, segmenting, whisper-cli |
+| `tools/whisper_run.py`, `tools/whisper_gaps.py` | Language probing, segmenting, whisper-cli; afterwards, finding stretches with speech but no text and re-transcribing them |
 | `tools/speakers.py`, `tools/diarize.py` | Two-track dialogue merge (echo removal); voiceprint diarization |
 | `tools/proofread.py`, `tools/analyze.py`, `tools/claude_cli.py` | Claude proofreading (only a list of corrections, applied verbatim) and analysis |
 | `tools/rex_app.py`, `tools/rex_app/` | Recording Desk web UI |

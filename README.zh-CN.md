@@ -132,7 +132,7 @@ rex app       # 打开录音台（之后常驻后台、开机自动起）
 | `tools/rex.sh` | `rex` 命令本体（bash 3.2） |
 | `tools/audiocap.swift` | CoreAudio 采集 → 命名管道 → ffmpeg；系统音频接口；授权 |
 | `tools/audiodev.swift` | 查 / 切音频设备，建 BlackHole 多输出设备 |
-| `tools/whisper_run.py` | 探测语言、分段、调 whisper-cli |
+| `tools/whisper_run.py`、`tools/whisper_gaps.py` | 探测语言、分段、调 whisper-cli；转完查有声音却没出字的地方、补转 |
 | `tools/speakers.py`、`tools/diarize.py` | 两轨合成对话稿（去回声）；声纹分人 |
 | `tools/proofread.py`、`tools/analyze.py`、`tools/claude_cli.py` | Claude 校对（只收修改清单、逐字替换）和分析 |
 | `tools/rex_app.py`、`tools/rex_app/` | 录音台网页界面 |

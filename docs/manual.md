@@ -620,7 +620,7 @@ The repetition did not come back. Every hit in the second column was read: about
 
 - **It can pull similar-sounding words off course.** See the table above. When you see this, add the affected words to the list too.
 - **Unclear passages can get filled with a word from the list.** A recording about data analysis produced one 赤心巡天 at a point where the speech was unclear.
-- **Occasionally a passage goes missing.** In 6.5 hours transcribed with a words-only list, 3 passages of 15–30 seconds produced no text, all where speech was sparse or indistinct; the same recordings without a list (3 hours) had none. Nothing reports it when this happens. If an important recording doesn't add up, move the list aside and transcribe it again to compare.
+- **Occasionally a passage goes missing.** In 6.5 hours transcribed with a words-only list, 3 passages of 15–30 seconds produced no text, all where speech was sparse or indistinct; the same recordings without a list (3 hours) had none. whisper doesn't report it when this happens, so transcription now checks afterwards: each such passage is reported, transcribed again on its own without the list, and put back into the transcript (see "Voice but no text" below).
 - It does **not** copy the list out when nobody is talking: pure noise with VAD on gives no text at all; with VAD off it makes up the same subtitle credits as without a list, none of the list's words (see "Why a track is empty" below).
 
 **Keep this file short.** The limit is 223 tokens (one Chinese character is 1–2 tokens); anything beyond that is cut off **from the beginning**, and an earlier test (2026-08, a 33-second sample) found a longer list worse than a short one. Each transcription starts by printing "Vocabulary list: N tokens (limit 223)" and warns if the list is over. Only include words that **have actually been misheard**.
@@ -670,6 +670,36 @@ python3 tools/keywords.py 某个稿子.txt --glossary tools/whisper-prompt.txt -
 On a track where nobody is speaking, whisper will **make up** content. In testing, a track containing nothing but ambient noise floor was transcribed as "中文字幕:王智英 李宗盛" (Chinese subtitles: Wang Zhiying, Li Zongsheng): its training data included subtitled videos.
 
 So VAD is on by default: passages without a human voice are skipped entirely, and an empty transcript says so explicitly: "这一轨 VAD 没找到人声" (VAD found no voice on this track). To see the raw behavior, add `--no-vad`.
+
+### Voice but no text: a check after transcription
+
+Once in a while whisper produces **no text for a whole passage**: the decoder goes through a 30-second window without writing anything, and the transcript is simply missing a piece. The exit code is 0 and the log looks normal. It has happened with a vocabulary list (see "Misheard words" above): in 6.5 hours transcribed with a words-only list, 3 passages of 15–30 seconds, all where speech was sparse or indistinct.
+
+So after transcription the transcript is checked against VAD (the same model that guards against hallucinations on silence): every stretch that **has speech but no text** is reported, transcribed again on its own without the vocabulary list, and what comes out is inserted into the .txt and .srt by time:
+
+```
+  ⚠️ 09:02–09:32 有声音但没转出字（人声约 8 秒）
+     不带词表单独重转这一段，补回 63 字：呵呵 切开了session 如果…体验 后来 后来 后来 也好 哦
+  补转的 12 条已按时间插进 .txt 和 .srt
+```
+
+(In English: "09:02–09:32: there is voice, but nothing was transcribed (about 8 s of speech)", "Re-transcribed this stretch on its own, without the vocabulary list; recovered 63 chars", "12 recovered entries were inserted into the .txt and .srt by time".)
+
+It looks for both ways of losing text:
+
+- **Nothing between two subtitles.** In the phone recording of a meeting above, there isn't a single subtitle from 09:01 to 09:33.
+- **One very long subtitle with plenty of speech in it but hardly any text.** At the start of a lecture a teaching assistant made an announcement (03:24–03:53); transcribed with a vocabulary list, all that was left was one subtitle from 00:01 to 05:06 with six characters, 「同学们 开始上课」 ("class is starting"). Milder cases too: in the same lecture a 31-second subtitle at 1:42:21 kept only its last sentence, and the 25 seconds of lecture before it were gone; it happens without a list as well (a 21-second subtitle in the meeting above, at 02:42, kept only its last sentence). Made-up text lying over speech counts too: transcribing the start of that lecture without a list, the assistant's announcement was covered by one subtitle of the well-known hallucination 「请不吝点赞 订阅 转发 打赏支持明镜与点点栏目」 (a YouTube-style "please like and subscribe").
+
+The rules:
+
+- **A stretch is only reported once it adds up to 5 seconds of speech.** Long silent gaps during a break or after class are not reported, and neither is the occasional cough or scraped chair.
+- **No duplicates, no reshuffled timeline.** The re-transcription is compared clause by clause, and anything the neighboring subtitles already have is dropped (it often merges several sentences into one subtitle); not a character of the existing text is changed and it keeps its order, only the numbering is redone. When the recovered text lands inside a "very long but nearly empty" subtitle, that subtitle is moved to where its few words really are: wherever the re-transcription has the same sentence, or else to after the recovered text, because such a subtitle's words are at its end (「同学们 开始上课」 was only said at 05:05, though the subtitle started at 00:01). If everything the re-transcription gives is already in the transcript, the text was there all along with its timestamps off, and it doesn't count as missing.
+- **If the re-transcription comes up empty too, it is still reported**, saying it may be unintelligible or not speech; if it matters, listen to that stretch. If the re-transcription itself fails, it says so; and when the language wasn't settled, a stretch is only reported, not re-transcribed (on a short stretch whisper guesses the language and gets murky passages wrong).
+- When nothing is missing it says "查过漏转：没有……" (Gap check: no stretch with speech but no text). With `--no-vad` there is no check, and it says so.
+
+**The re-transcribed sentences have no context**, so they are occasionally less accurate than a full-length transcription: for the same passage, transcribing the whole recording without a list gave 「好的好的好的」, while transcribing the passage on its own gave 「后来 后来 后来」. Occasionally it also comes out in traditional characters (without a list, whisper picks simplified or traditional window by window; duplicates are compared after folding to simplified, and what is inserted is left as it came). That still beats a missing passage; for an important recording, listen at the reported times.
+
+Extra time: one VAD pass, about 10 seconds for a two-hour recording, plus a few seconds per re-transcribed stretch. The thresholds and how they were calibrated are in the header of `tools/whisper_gaps.py`.
 
 ---
 
